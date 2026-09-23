@@ -70,6 +70,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("kLookAheadDistance", 5.0);
   this->declare_parameter<double>("kExtendWayPointDistanceBig", 8.0);
   this->declare_parameter<double>("kExtendWayPointDistanceSmall", 3.0);
+  // Straight ahead of the robot, sent before the first plan; <= 0 sends none
+  this->declare_parameter<double>("kInitialWaypointDistance", 12.0);
 
   // Int
   this->declare_parameter<int>("kDirectionChangeCounterThr", 4);
@@ -123,6 +125,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("kPointCloudCellHeight", 3.0);
   this->declare_parameter<int>("kPointCloudManagerNeighborCellNum", 5);
   this->declare_parameter<double>("kCoverCloudZSqueezeRatio", 2.0);
+  // Read by PlanningEnv and ViewPointManager: undeclared, get_parameter() left it uninitialized and the yaml was ignored
+  this->declare_parameter<bool>("kUseFrontier", true);
   this->declare_parameter<double>("kFrontierClusterTolerance", 1.0);
   this->declare_parameter<int>("kFrontierClusterMinSize", 30);
   this->declare_parameter<bool>("kUseCoverageBoundaryOnFrontier", false);
@@ -132,6 +136,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("rolling_occupancy_grid/resolution_x", 0.3);
   this->declare_parameter<double>("rolling_occupancy_grid/resolution_y", 0.3);
   this->declare_parameter<double>("rolling_occupancy_grid/resolution_z", 0.3);
+  // Rays free occupied cells the current scan no longer hits, and surface points in free cells are not to be covered
+  this->declare_parameter<bool>("rolling_occupancy_grid/kClearDynamicObstacle", false);
 
   // viewpoint_manager
   this->declare_parameter<int>("viewpoint_manager/number_x", 80);
@@ -226,6 +232,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("kExtendWayPointDistanceBig", kExtendWayPointDistanceBig);
   this->get_parameter("kExtendWayPointDistanceSmall",
                       kExtendWayPointDistanceSmall);
+  this->get_parameter("kInitialWaypointDistance", kInitialWaypointDistance);
 
   this->get_parameter("kDirectionChangeCounterThr", kDirectionChangeCounterThr);
   this->get_parameter("kDirectionNoChangeCounterThr",
@@ -674,7 +681,7 @@ void SensorCoveragePlanner3D::ResetWaypointCallback(
 
 void SensorCoveragePlanner3D::SendInitialWaypoint() {
   // send waypoint ahead
-  double lx = 12.0;
+  double lx = kInitialWaypointDistance;
   double ly = 0.0;
   double dx = cos(robot_yaw_) * lx - sin(robot_yaw_) * ly;
   double dy = sin(robot_yaw_) * lx + cos(robot_yaw_) * ly;
@@ -717,6 +724,17 @@ int SensorCoveragePlanner3D::UpdateViewPoints() {
   if (kUseTerrainHeight) {
     viewpoint_manager_->SetViewPointHeightWithTerrain(
         large_terrain_cloud_->cloud_);
+  }
+  {  // DEBUG-STALL: collision points within 0.7 m (xy) of the robot, per source
+    auto count_near = [this](const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud) {
+      int n = 0;
+      for (const auto &p : cloud->points)
+        n += std::hypot(p.x - robot_position_.x, p.y - robot_position_.y) < 0.7;
+      return std::to_string(n) + "/" + std::to_string(cloud->points.size());
+    };
+    collision_debug_ = "near0.7 surf=" + count_near(collision_cloud_->cloud_) +
+                       " terrain=" + count_near(terrain_collision_cloud_->cloud_) +
+                       " terrain_ext=" + count_near(terrain_ext_collision_cloud_->cloud_);
   }
   if (kCheckTerrainCollision) {
     *(collision_cloud_->cloud_) += *(terrain_collision_cloud_->cloud_);
@@ -940,7 +958,8 @@ void SensorCoveragePlanner3D::PublishGlobalPlanningVisualization(
   nav_msgs::msg::Path full_path = exploration_path_.GetPath();
   full_path.header.frame_id = "map";
   full_path.header.stamp = this->now();
-  // exploration_path_publisher_->publish(full_path);
+  // /way_point lies on this path (or on global_path_full): path followers (tare_path_to_opti_pessi_goal.py) steer along it
+  exploration_path_publisher_->publish(full_path);
   exploration_path_.GetVisualizationCloud(exploration_path_cloud_->cloud_);
   exploration_path_cloud_->Publish();
   // planning_env_->PublishStackedCloud();
@@ -1061,6 +1080,9 @@ bool SensorCoveragePlanner3D::GetLookAheadPoint(
     }
   }
   if (local_path.GetNodeNum() < 1 || local_path_too_short) {
+    lookahead_debug_ = "too_short(local_n=" + std::to_string(local_path.GetNodeNum()) + " global_n=" +  // DEBUG-STALL
+                       std::to_string(global_path.GetNodeNum()) + " global_len=" +
+                       std::to_string(global_path.GetLength()) + ")";
     if (dist_from_start < dist_from_end) {
       double dist_from_robot = 0.0;
       for (int i = 1; i < global_path.nodes_.size(); i++) {
@@ -1069,6 +1091,7 @@ bool SensorCoveragePlanner3D::GetLookAheadPoint(
                                .norm();
         if (dist_from_robot > kLookAheadDistance / 2) {
           lookahead_point = global_path.nodes_[i].position_;
+          lookahead_debug_ += " global_node";  // DEBUG-STALL
           break;
         }
       }
@@ -1080,6 +1103,7 @@ bool SensorCoveragePlanner3D::GetLookAheadPoint(
                                .norm();
         if (dist_from_robot > kLookAheadDistance / 2) {
           lookahead_point = global_path.nodes_[i].position_;
+          lookahead_debug_ += " global_node";  // DEBUG-STALL
           break;
         }
       }
@@ -1270,7 +1294,14 @@ bool SensorCoveragePlanner3D::GetLookAheadPoint(
   } else {
     relocation_ = false;
   }
+  lookahead_debug_ = "local_n=" + std::to_string(local_path.GetNodeNum()) + " robot_i=" + std::to_string(robot_i) +  // DEBUG-STALL
+                     " fwd_vp=" + std::to_string(forward_viewpoint_count) + " bwd_vp=" +
+                     std::to_string(backward_viewpoint_count) + " has_fwd=" + std::to_string(has_forward) +
+                     " has_bwd=" + std::to_string(has_backward) + " fwd_score=" + std::to_string(forward_angle_score) +
+                     " bwd_score=" + std::to_string(backward_angle_score) + " loop=" + std::to_string(local_loop) +
+                     " dir=(" + std::to_string(dx) + "," + std::to_string(dy) + ")";
   if (relocation_) {
+    lookahead_debug_ += " RELOCATION";  // DEBUG-STALL
     if (use_momentum_ && kUseMomentum) {
       if (forward_angle_score > backward_angle_score) {
         lookahead_point = forward_lookahead_point;
@@ -1300,7 +1331,9 @@ bool SensorCoveragePlanner3D::GetLookAheadPoint(
 
   {
     lookahead_point = local_path.nodes_[lookahead_i].position_;
+    lookahead_debug_ += " KEEP_PREV";  // DEBUG-STALL
   } else {
+    lookahead_debug_ += " CHOOSE";  // DEBUG-STALL
     if (forward_angle_score > backward_angle_score) {
       if (forward_viewpoint_count > 0) {
         lookahead_point = forward_lookahead_point;
@@ -1469,11 +1502,17 @@ void SensorCoveragePlanner3D::execute() {
   overall_runtime_ = 0;
 
   if (!initialized_) {
-    SendInitialWaypoint();
     start_time_ = this->now().seconds();
+    // The execution timer is a wall timer: with use_sim_time it can fire before the first /clock message
     if(start_time_ == 0.0){
-      RCLCPP_ERROR(this->get_logger(), "Start time is zero, time source (use_time_time) not set correctly. Exiting...");
-      exit(1);
+      RCLCPP_WARN(this->get_logger(), "Start time is zero, waiting for /clock (use_sim_time)");
+      return;
+    }
+    // GetLookAheadPoint() leaves the lookahead point as it was when it finds none (e.g. a global path shorter than
+    // kLookAheadDistance / 2 on the first plans): until then the waypoint is the robot position, not uninitialized memory
+    lookahead_point_ = Eigen::Vector3d(robot_position_.x, robot_position_.y, robot_position_.z);
+    if (kInitialWaypointDistance > 0.0) {
+      SendInitialWaypoint();
     }
     global_direction_switch_time_ = this->now().seconds();
     initialized_ = true;
@@ -1529,6 +1568,7 @@ void SensorCoveragePlanner3D::execute() {
 
     double current_time = this->now().seconds();
     double delta_time = current_time - start_time_;
+    bool finished_before = exploration_finished_;  // DEBUG-STALL
 
     if (grid_world_->IsReturningHome() &&
         local_coverage_planner_->IsLocalCoverageComplete() &&
@@ -1551,6 +1591,39 @@ void SensorCoveragePlanner3D::execute() {
     lookahead_point_update_ =
         GetLookAheadPoint(exploration_path_, global_path, lookahead_point_);
     PublishWaypoint();
+    {  // DEBUG-STALL
+      std::string types;
+      for (const auto &n : exploration_path_.nodes_) types += std::to_string(static_cast<int>(n.type_)) + ",";
+      double d = std::hypot(lookahead_point_.x() - robot_position_.x, lookahead_point_.y() - robot_position_.y);
+      int cand_visited = 0;
+      for (int ind : viewpoint_manager_->candidate_indices_) cand_visited += viewpoint_manager_->ViewPointVisited(ind);
+      int cloud_covered = 0;
+      const auto planner_cloud = planning_env_->GetPlannerCloud();
+      for (const auto &p : planner_cloud->points) cloud_covered += (p.g > 0);
+      Eigen::Vector3d origin = viewpoint_manager_->GetOrigin();
+      RCLCPP_INFO(this->get_logger(),
+                  "STALLDBG2 t=%.1f robot=(%.2f,%.2f,%.2f) vp_origin=(%.2f,%.2f) cand_visited=%d cloud=%zu covered=%d "
+                  "frontier_cloud=%d",
+                  delta_time, robot_position_.x, robot_position_.y, robot_position_.z, origin.x(), origin.y(),
+                  cand_visited, planner_cloud->points.size(), cloud_covered, uncovered_frontier_point_num);
+      RCLCPP_INFO(this->get_logger(),
+                  "STALLDBG t=%.1f vp_cand=%d uncov=%d uncov_frontier=%d finished=%d returning_home=%d "
+                  "local_complete=%d global_n=%d global_len=%.2f local_n=%d local_len=%.2f expl_n=%d types=[%s] "
+                  "update=%d la_dist=%.2f | %s",
+                  delta_time, viewpoint_candidate_count, uncovered_point_num, uncovered_frontier_point_num,
+                  exploration_finished_, grid_world_->IsReturningHome(),
+                  local_coverage_planner_->IsLocalCoverageComplete(), global_path.GetNodeNum(),
+                  global_path.GetLength(), local_path.GetNodeNum(), local_path.GetLength(),
+                  exploration_path_.GetNodeNum(), types.c_str(), lookahead_point_update_, d,
+                  lookahead_debug_.c_str());
+      RCLCPP_INFO(this->get_logger(), "STALLDBG3 t=%.1f %s %s", delta_time,
+                  viewpoint_manager_->connectivity_debug_.c_str(), collision_debug_.c_str());
+      if (viewpoint_candidate_count < 100 || (exploration_finished_ && !finished_before)) {
+        RCLCPP_INFO(this->get_logger(), "STALLDBG_GRID t=%.1f (R robot, X robot in collision, # collision, "
+                    "C candidate, c visited candidate, o free+LOS unconnected, . never LOS; +y up)\n%s",
+                    delta_time, viewpoint_manager_->GetDebugGridString(12).c_str());
+      }
+    }
 
     overall_processing_timer.Stop(false);
     overall_runtime_ = overall_processing_timer.GetDuration("ms");

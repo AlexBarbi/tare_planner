@@ -128,6 +128,8 @@ target_link_libraries(navigationBoundary ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 add_executable(tare_planner_node src/tare_planner_node/tare_planner_node.cpp)
 ament_target_dependencies(tare_planner_node rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2)
 target_link_libraries(tare_planner_node ${catkin_LIBRARIES} sensor_coverage_planner_ground)
+# The prebuilt OR-Tools is not on the loader path once installed: it is installed to lib/ (below) and found through the RPATH
+set_target_properties(tare_planner_node PROPERTIES INSTALL_RPATH "$ORIGIN/..")
 
 #############
 ## Install ##
@@ -137,6 +139,11 @@ install(TARGETS
   navigationBoundary
   tare_planner_node
   DESTINATION lib/${PROJECT_NAME})
+
+install(FILES
+  or-tools/lib/libortools.so.9
+  or-tools/lib/libortools.so.9.8.3296
+  DESTINATION lib)
 
 install(DIRECTORY launch/
         DESTINATION share/${PROJECT_NAME}/

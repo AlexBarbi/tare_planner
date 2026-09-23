@@ -93,6 +93,9 @@ class ViewPointManager
 {
 public:
   std::vector<int> candidate_indices_;
+  std::string connectivity_debug_;  // DEBUG-STALL
+  // DEBUG-STALL: viewpoint grid around the robot, one char per viewpoint (legend in the .cpp)
+  std::string GetDebugGridString(int half_size);
   explicit ViewPointManager(rclcpp::Node::SharedPtr nh);
   ~ViewPointManager() = default;
 

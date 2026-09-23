@@ -789,9 +789,13 @@ void ViewPointManager::CheckViewPointConnectivity()
     if (!found_collision_free_viewpoint)
     {
       std::cout << "All viewpoints in collision, exisiting" << std::endl;
+      connectivity_debug_ = "ALL_IN_COLLISION";  // DEBUG-STALL
       return;
     }
   }
+  Eigen::Vector3i start_sub = grid_->Ind2Sub(robot_ind);  // DEBUG-STALL
+  geometry_msgs::msg::Point start_position = GetViewPointPosition(robot_ind);
+  double start_dist = std::hypot(start_position.x - robot_position_.x(), start_position.y - robot_position_.y());
   for (auto& viewpoint : viewpoints_)
   {
     viewpoint.SetConnected(false);
@@ -826,6 +830,52 @@ void ViewPointManager::CheckViewPointConnectivity()
       checked[neighbor_ind] = true;
     }
   }
+  int collision_count = 0;  // DEBUG-STALL
+  int line_of_sight_count = 0;
+  for (int i = 0; i < vp_.kViewPointNumber; i++)
+  {
+    collision_count += ViewPointInCollision(i);
+    line_of_sight_count += ViewPointInLineOfSight(i);
+  }
+  connectivity_debug_ = "robot_sub=(" + std::to_string(robot_sub.x()) + "," + std::to_string(robot_sub.y()) +
+                        ") robot_coll=" + std::to_string(ViewPointInCollision(grid_->Sub2Ind(robot_sub))) +
+                        " bfs_start=(" + std::to_string(start_sub.x()) + "," + std::to_string(start_sub.y()) +
+                        ") start_dist=" + std::to_string(start_dist) +
+                        " connected=" + std::to_string(connected_viewpoint_count) +
+                        " coll=" + std::to_string(collision_count) + " los=" + std::to_string(line_of_sight_count);
+}
+
+std::string ViewPointManager::GetDebugGridString(int half_size)  // DEBUG-STALL
+{
+  // Rows are +y first (up), columns +x (right). R robot viewpoint, # in collision, C candidate, c visited candidate,
+  // o free + line of sight but not connected, . free but never in line of sight
+  std::string out;
+  Eigen::Vector3i robot_sub = GetViewPointSub(robot_position_);
+  for (int y = robot_sub.y() + half_size; y >= robot_sub.y() - half_size; y--)
+  {
+    for (int x = robot_sub.x() - half_size; x <= robot_sub.x() + half_size; x++)
+    {
+      Eigen::Vector3i sub(x, y, 0);
+      if (!grid_->InRange(sub))
+      {
+        out += ' ';
+        continue;
+      }
+      int ind = grid_->Sub2Ind(sub);
+      char c = '.';
+      if (ViewPointInCollision(ind))
+        c = '#';
+      else if (IsViewPointCandidate(ind))
+        c = ViewPointVisited(ind) ? 'c' : 'C';
+      else if (ViewPointInLineOfSight(ind))
+        c = 'o';
+      if (sub == robot_sub)
+        c = (c == '#') ? 'X' : 'R';
+      out += c;
+    }
+    out += '\n';
+  }
+  return out;
 }
 
 void ViewPointManager::UpdateViewPointVisited(const std::vector<Eigen::Vector3d>& positions)

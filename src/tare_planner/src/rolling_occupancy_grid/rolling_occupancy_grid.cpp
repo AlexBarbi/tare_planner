@@ -26,6 +26,7 @@ RollingOccupancyGrid::RollingOccupancyGrid(rclcpp::Node::SharedPtr nh) : initial
   resolution_.x() = nh->get_parameter("rolling_occupancy_grid/resolution_x").as_double();
   resolution_.y() = nh->get_parameter("rolling_occupancy_grid/resolution_y").as_double();
   resolution_.z() = nh->get_parameter("rolling_occupancy_grid/resolution_z").as_double();
+  clear_dynamic_obstacle_ = nh->get_parameter("rolling_occupancy_grid/kClearDynamicObstacle").as_bool();
 
   rollover_range_.x() = pointcloud_cell_size;
   rollover_range_.y() = pointcloud_cell_size;
@@ -41,6 +42,10 @@ RollingOccupancyGrid::RollingOccupancyGrid(rclcpp::Node::SharedPtr nh) : initial
   rolling_grid_ = std::make_shared<rolling_grid_ns::RollingGrid>(grid_size_);
 
   occupancy_array_ = std::make_shared<grid_ns::Grid<CellState>>(grid_size_, UNKNOWN, origin_, resolution_);
+  if (clear_dynamic_obstacle_)
+  {
+    hit_now_.resize(occupancy_array_->GetCellNumber(), false);
+  }
 
   robot_position_ = Eigen::Vector3d(0, 0, 0);
 
@@ -179,6 +184,17 @@ void RollingOccupancyGrid::RayTrace(const Eigen::Vector3d& origin, const Eigen::
 
   misc_utils_ns::UniquifyIntVector(updated_grid_indices_);
 
+  if (clear_dynamic_obstacle_)
+  {
+    for (const auto& ind : updated_grid_indices_)
+    {
+      if (occupancy_array_->InRange(ind))
+      {
+        hit_now_[ind] = true;
+      }
+    }
+  }
+
   for (const auto& ind : updated_grid_indices_)
   {
     if (occupancy_array_->InRange(ind))
@@ -206,18 +222,51 @@ void RollingOccupancyGrid::RayTrace(const Eigen::Vector3d& origin, const Eigen::
         int array_ind = rolling_grid_->GetArrayInd(ray_sub);
         if (occupancy_array_->GetCellValue(array_ind) == OCCUPIED)
         {
-          break;
-        }
-        else
-        {
-          if (occupancy_array_->GetCellValue(array_ind) != OCCUPIED)
+          // A ray grazing a surface on its way to the end cell crosses that surface's cells next to it: keep them
+          if (BlocksRay(ray_sub) || (ray_sub - cur_sub).cwiseAbs().maxCoeff() <= 1)
           {
-            occupancy_array_->SetCellValue(array_ind, FREE);
+            break;
           }
         }
+        occupancy_array_->SetCellValue(array_ind, FREE);
       }
     }
   }
+
+  if (clear_dynamic_obstacle_)
+  {
+    for (const auto& ind : updated_grid_indices_)
+    {
+      if (occupancy_array_->InRange(ind))
+      {
+        hit_now_[ind] = false;
+      }
+    }
+  }
+}
+
+bool RollingOccupancyGrid::BlocksRay(const Eigen::Vector3i& sub)
+{
+  int array_ind = rolling_grid_->GetArrayInd(sub);
+  if (occupancy_array_->GetCellValue(array_ind) != OCCUPIED)
+  {
+    return false;
+  }
+  return !clear_dynamic_obstacle_ || hit_now_[occupancy_array_->Sub2Ind(sub)];
+}
+
+bool RollingOccupancyGrid::IsFree(const Eigen::Vector3d& position)
+{
+  if (!initialized_)
+  {
+    return false;
+  }
+  Eigen::Vector3i sub = occupancy_array_->Pos2Sub(position);
+  if (!occupancy_array_->InRange(sub))
+  {
+    return false;
+  }
+  return occupancy_array_->GetCellValue(rolling_grid_->GetArrayInd(sub)) == FREE;
 }
 
 void RollingOccupancyGrid::RayTrace(const Eigen::Vector3d& origin)
@@ -259,8 +308,7 @@ void RollingOccupancyGrid::RayTraceHelper(const Eigen::Vector3i& start_sub, cons
   {
     cells.push_back(cur_sub);
     dist = (cur_sub - start_sub).squaredNorm();
-    int array_ind = rolling_grid_->GetArrayInd(cur_sub);
-    if (cur_sub == end_sub || dist > max_dist || occupancy_array_->GetCellValue(array_ind) == OCCUPIED)
+    if (cur_sub == end_sub || dist > max_dist || BlocksRay(cur_sub))
     {
       return;
     }

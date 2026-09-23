@@ -373,6 +373,12 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
     {
       continue;
     }
+    // A surface point whose cell rays now pass through belonged to something that moved away: nothing to cover
+    if (parameters_.kUseFrontier && rolling_occupancy_grid_->ClearsDynamicObstacles() &&
+        rolling_occupancy_grid_->IsFree(Eigen::Vector3d(point.x, point.y, point.z)))
+    {
+      continue;
+    }
     bool observed = false;
     for (const auto& viewpoint_ind : viewpoint_manager->candidate_indices_)
     {

@@ -110,6 +110,7 @@ private:
   double kLookAheadDistance;
   double kExtendWayPointDistanceBig;
   double kExtendWayPointDistanceSmall;
+  double kInitialWaypointDistance;
 
   // Int
   int kDirectionChangeCounterThr;
@@ -193,6 +194,8 @@ private:
   bool use_momentum_;
   bool lookahead_point_in_line_of_sight_;
   bool reset_waypoint_;
+  std::string lookahead_debug_;  // DEBUG-STALL
+  std::string collision_debug_;  // DEBUG-STALL
   pointcloud_utils_ns::PointCloudDownsizer<pcl::PointXYZ> pointcloud_downsizer_;
 
   int update_representation_runtime_;

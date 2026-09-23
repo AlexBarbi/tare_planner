@@ -72,6 +72,12 @@ public:
 
   void GetFrontier(pcl::PointCloud<pcl::PointXYZI>::Ptr& frontier_cloud, const Eigen::Vector3d& origin,
                    const Eigen::Vector3d& range);
+  bool ClearsDynamicObstacles() const
+  {
+    return clear_dynamic_obstacle_;
+  }
+  // Inside the grid and observed free (UNKNOWN and OCCUPIED are not)
+  bool IsFree(const Eigen::Vector3d& position);
   pcl::PointCloud<pcl::PointXYZI>::Ptr GetRolledOutOccupancyCloud()
   {
     return occupancy_cloud_;
@@ -92,8 +98,13 @@ private:
   std::shared_ptr<grid_ns::Grid<CellState>> occupancy_array_;
   std::vector<int> updated_grid_indices_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr occupancy_cloud_;
+  // Local patch: rays also free OCCUPIED cells that the current cloud does not hit (things that moved away). Upstream
+  // stops every ray at the first OCCUPIED cell, so a cell once occupied stays so until it rolls out of the grid.
+  bool clear_dynamic_obstacle_;
+  std::vector<bool> hit_now_;  // by grid ind: hit by the cloud of the current UpdateOccupancy()
 
   bool InRange(const Eigen::Vector3i& sub, const Eigen::Vector3i& sub_min, const Eigen::Vector3i& sub_max);
+  bool BlocksRay(const Eigen::Vector3i& sub);
 
   // void InitializeOrigin();
 };
