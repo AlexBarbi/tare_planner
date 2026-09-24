@@ -8,7 +8,9 @@
                /way_point (the TARE paths are not used).
        TF:  odom -> lio_map -> camera_init -> map, as in far_planner_nav_launch.xml (odom -> lio_map from lio_odom_alignment.py).
        auto_start:=false waits for  ros2 topic pub -1 /start_exploration std_msgs/msg/Bool "{data: true}".
-       ros2 topic pub -1 /reset_waypoint std_msgs/msg/Empty "{}" stops the robot where it is (TARE waypoint = robot position). -->
+       ros2 topic pub -1 /reset_waypoint std_msgs/msg/Empty "{}" stops the robot where it is (TARE waypoint = robot position).
+       save_graph: far_planner runs along only to build its visibility graph, saved as graph_name next to map_name when
+       the exploration ends, then stopped; far_planner_launch.xml loads it in the next missions. -->
   <arg name="use_sim_time" default="true"/>
   <arg name="terrain" default="true" description="Run terrainAnalysis and terrainAnalysisExt (false if already running)"/>
   <arg name="rviz" default="true"/>
@@ -17,6 +19,9 @@
   <arg name="waypoint" default="false" description="The robot follows a waypoint instead a middle point between the robot and the TARE waypoint (false: middle point)"/>
   <arg name="merge_map" default="true" description="When TARE finishes exploring: stop TARE and the robot, merge the SC-PGO keyframes into map_name"/>
   <arg name="map_name" default="optimized_map.pcd" description="Merged map file, in the SC-PGO save_directory"/>
+  <arg name="save_graph" default="true" description="Run far_planner during the exploration and save its graph as graph_name at the end (needs merge_map)"/>
+  <arg name="graph_name" default="warehouse.vgh" description="FAR visibility graph file, in the SC-PGO save_directory"/>
+  <arg name="far_config" default="default" description="Config file stem in far_planner/config"/>
 
   <node pkg="legged_controllers" exec="lio_odom_alignment.py" name="lio_odom_alignment" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
@@ -46,6 +51,23 @@
     <param name="kAutoStart" value="$(var auto_start)"/>
   </node>
 
+  <!-- far_planner only builds its graph here: its /way_point (also sent on a graph reset, with the robot position) is
+       remapped away from the goal bridges, which take TARE's. name must stay far_planner: the yaml is keyed by node name -->
+  <node if="$(var save_graph)" pkg="far_planner" exec="far_planner" name="far_planner" output="screen">
+    <param from="$(find-pkg-share far_planner)/config/$(var far_config).yaml"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <remap from="/odom_world" to="/Odometry"/>
+    <remap from="/terrain_cloud" to="/terrain_map_ext"/>
+    <remap from="/scan_cloud" to="/terrain_map"/>
+    <remap from="/terrain_local_cloud" to="/cloud_registered"/>
+    <remap from="/way_point" to="/far_planner/way_point"/>
+  </node>
+  <node if="$(var save_graph)" pkg="graph_decoder" exec="graph_decoder" name="graph_decoder" output="screen">
+    <param name="world_frame" value="map"/>
+    <param name="visual_scale_ratio" value="0.5"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
   <node unless="$(var waypoint)" pkg="legged_controllers" exec="tare_path_to_opti_pessi_goal.py" name="tare_path_to_opti_pessi_goal" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
@@ -53,9 +75,13 @@
 
   <!-- On /exploration_finish: SIGINT to tare_planner_node and the goal bridges (no return home), a stop goal at the
        robot, then makeMergedMap.py (.venv-yolo python, no viewer) on alaserPGO's save_directory; log next to the map.
-       Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
+       With save_graph, the FAR graph is saved there too (/save_file_dir -> graph_decoder), then far_planner and
+       graph_decoder are stopped. Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
+  <let name="finish_graph_name" value=""/>
+  <let if="$(var save_graph)" name="finish_graph_name" value="$(var graph_name)"/>
   <node if="$(var merge_map)" pkg="legged_controllers" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
     <param name="map_name" value="$(var map_name)"/>
+    <param name="graph_name" value="$(var finish_graph_name)"/>
   </node>
 
   <node if="$(var rviz)" pkg="rviz2" exec="rviz2" name="tare_nav_rviz"
