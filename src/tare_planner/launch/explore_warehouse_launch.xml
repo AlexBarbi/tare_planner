@@ -15,6 +15,8 @@
   <arg name="tare_config" default="aliengo" description="Config file stem in tare_planner/config"/>
   <arg name="auto_start" default="false" description="Explore at once; false waits for /start_exploration"/>
   <arg name="waypoint" default="false" description="The robot follows a waypoint instead a middle point between the robot and the TARE waypoint (false: middle point)"/>
+  <arg name="merge_map" default="true" description="When TARE finishes exploring: stop TARE and the robot, merge the SC-PGO keyframes into map_name"/>
+  <arg name="map_name" default="optimized_map.pcd" description="Merged map file, in the SC-PGO save_directory"/>
 
   <node pkg="legged_controllers" exec="lio_odom_alignment.py" name="lio_odom_alignment" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
@@ -48,6 +50,13 @@
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
   <node if="$(var waypoint)" pkg="legged_controllers" exec="way_point_to_opti_pessi_goal.py" name="way_point_to_opti_pessi_goal" output="screen"/>
+
+  <!-- On /exploration_finish: SIGINT to tare_planner_node and the goal bridges (no return home), a stop goal at the
+       robot, then makeMergedMap.py (.venv-yolo python, no viewer) on alaserPGO's save_directory; log next to the map.
+       Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
+  <node if="$(var merge_map)" pkg="legged_controllers" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
+    <param name="map_name" value="$(var map_name)"/>
+  </node>
 
   <node if="$(var rviz)" pkg="rviz2" exec="rviz2" name="tare_nav_rviz"
     args="-d $(find-pkg-share tare_planner)/tare_planner_warehouse.rviz">
