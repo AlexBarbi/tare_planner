@@ -20,7 +20,9 @@
   <arg name="tare_config" default="aliengo" description="Config file stem in tare_planner/config"/>
   <arg name="auto_start" default="false" description="Explore at once; false waits for /start_exploration"/>
   <arg name="waypoint" default="false" description="The robot follows a waypoint instead a middle point between the robot and the TARE waypoint (false: middle point)"/>
-  <arg name="merge_map" default="true" description="When TARE finishes exploring: stop TARE and the robot, merge the SC-PGO keyframes into map_name"/>
+  <arg name="merge_map" default="true" description="When TARE finishes exploring: the robot returns home (return_home), then stop TARE and the robot, merge the SC-PGO keyframes into map_name"/>
+  <arg name="return_home" default="true" description="With merge_map: when TARE finishes exploring it walks the robot back to where it started, and only then is it stopped and the map merged; false stops the robot where the exploration ends"/>
+  <arg name="return_home_timeout" default="600.0" description="Seconds given to the return home; after that the robot is stopped where it is and the map merged"/>
   <arg name="map_name" default="optimized_map.pcd" description="Merged map file, in the SC-PGO save_directory"/>
   <arg name="save_graph" default="true" description="Run far_planner during the exploration and save its graph as graph_name at the end (needs merge_map)"/>
   <arg name="graph_name" default="warehouse.vgh" description="FAR visibility graph file, in the SC-PGO save_directory"/>
@@ -102,8 +104,10 @@
   </node>
   <node if="$(var waypoint)" pkg="legged_controllers" exec="way_point_to_opti_pessi_goal.py" name="way_point_to_opti_pessi_goal" output="screen"/>
 
-  <!-- On /exploration_finish: SIGINT to tare_planner_node and the goal bridges (no return home), a stop goal at the
-       robot, then makeMergedMap.py (.venv-yolo python, no viewer) on alaserPGO's save_directory; log next to the map.
+  <!-- On /exploration_finish: with return_home, first waits until TARE has brought the robot back to where it stood
+       when this launch started (within 0.5 m, or return_home_timeout). Then SIGINT to tare_planner_node and the
+       goal bridges, a stop goal at the robot, then makeMergedMap.py (.venv-yolo python, no viewer) on alaserPGO's
+       save_directory; log next to the map.
        With save_graph, the FAR graph is saved there too (/save_file_dir -> graph_decoder), then far_planner and
        graph_decoder are stopped. Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
   <let name="finish_graph_name" value=""/>
@@ -111,6 +115,8 @@
   <node if="$(var merge_map)" pkg="legged_controllers" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
     <param name="map_name" value="$(var map_name)"/>
     <param name="graph_name" value="$(var finish_graph_name)"/>
+    <param name="return_home" value="$(var return_home)"/>
+    <param name="return_home_timeout" value="$(var return_home_timeout)"/>
   </node>
 
   <node if="$(var rviz)" pkg="rviz2" exec="rviz2" name="tare_nav_rviz"
