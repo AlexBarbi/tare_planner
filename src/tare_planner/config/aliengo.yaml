@@ -14,9 +14,9 @@
 #    rollover step is number / 5): local horizon 70 * 0.3 = 21 m, global subspace cells 21 / 5 = 4.2 m; ~2x the
 #    viewpoints (and viewpoint update time) of the 50 x 50 grid.
 #  - keypose_graph/kAddEdgeCollisionCheckRadius 0.25 [0.4]: same margin for keypose edges, which the global path follows.
-#  - kSensorRange 7.5 [7.5]: the coverage model assumes +-12 deg vertical FOV all round; the L2 is mounted upside down
-#    (pitch 164.9 deg) and above its plane only sees forward, up to ~+15 deg. At 10 m TARE counted rooms seen through a
-#    door as covered.
+#  - kSensorRange 7.5 [7.5]: the coverage model assumes +-12 deg vertical FOV all round. Tuned with the Unitree L2
+#    (upside down, above its plane only forward up to ~+15 deg), where at 10 m TARE counted rooms seen through a door as
+#    covered; not retuned for the RoboSense Airy (pitched 15 deg forward: -15 deg ahead to +15 deg behind and up).
 #  - kCheckDynamicObstacleCollision true [false]: a viewpoint in collision stays so until the local horizon rolls it out;
 #    with this, it is freed once it has had no obstacle point for more than kCollisionFrameCountMax updates and lies
 #    between the robot and an obstacle seen now (people who walked away, SLAM noise), instead of blocking a door or
@@ -32,7 +32,10 @@ tare_planner_node:
     sub_terrain_map_topic_ : /terrain_map
     sub_terrain_map_ext_topic_ : /terrain_map_ext
     sub_state_estimation_topic_ : /Odometry
-    sub_registered_scan_topic_ : /cloud_registered
+    # FAST-LIO /cloud_registered through people_perception dynamic_points_filter (started by fast_lio_slam_launch.xml):
+    # coverage, keypose cloud and planning environment accumulate this cloud, so it comes without the tracked people.
+    # The terrain maps above stay on the full cloud: they are the collision check.
+    sub_registered_scan_topic_ : /registered_scan_static
     sub_coverage_boundary_topic_ : /sensor_coverage_planner/coverage_boundary
     sub_viewpoint_boundary_topic_ : /navigation_boundary
     sub_nogo_boundary_topic_ : /sensor_coverage_planner/nogo_boundary
@@ -44,13 +47,13 @@ tare_planner_node:
     pub_waypoint_topic_ : /way_point
     pub_momentum_activation_count_topic_ : momentum_activation_count
 
-    kAutoStart : false
+    kAutoStart : true
     kRushHome : true
     kUseTerrainHeight : false
     kCheckTerrainCollision : true
     kExtendWayPoint : false
     kUseLineOfSightLookAheadPoint : true
-    kNoExplorationReturnHome : true
+    kNoExplorationReturnHome : false
     kExtendWayPointDistanceBig : 8.0
     kExtendWayPointDistanceSmall : 3.5
     kInitialWaypointDistance : 0.0

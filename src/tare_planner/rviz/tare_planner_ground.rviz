@@ -182,15 +182,15 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        unilidar_imu:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        unilidar_lidar:
+        rslidar:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
+        rslidar_optical:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
       Mass Properties:
         Inertia: false
         Mass: false

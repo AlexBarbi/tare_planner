@@ -2,15 +2,18 @@
   <!-- Terrain analysis + TARE exploration on top of fast_lio_slam_launch.xml, driving OptiPessiController, with one rviz
        showing robot, LIO, terrain, exploration and OptiPessi plans. Start it after fast_lio_slam_launch.xml, once the
        robot stands (OptiPessi stands until the first goal).
-       Topics: TARE reads /Odometry, /cloud_registered (FAST-LIO), /terrain_map, /terrain_map_ext (tare_planner/config/aliengo.yaml)
-               and publishes /way_point, /exploration_path, /global_path_full (frame map). tare_path_to_opti_pessi_goal.py
-               does not relay /way_point: it sends /opti_pessi/goal (odom) at the middle point between the robot and
-               /way_point (the TARE paths are not used).
+       Topics: TARE reads /Odometry (FAST-LIO), /registered_scan_static (FAST-LIO /cloud_registered through people_perception
+               dynamic_points_filter, which fast_lio_slam_launch.xml starts), /terrain_map, /terrain_map_ext
+               (tare_planner/config/aliengo.yaml) and publishes /way_point, /exploration_path, /global_path_full
+               (frame map). tare_path_to_opti_pessi_goal.py does not relay /way_point: it sends /opti_pessi/goal (odom)
+               at the middle point between the robot and /way_point (the TARE paths are not used).
        TF:  odom -> lio_map -> camera_init -> map, as in far_planner_nav_launch.xml (odom -> lio_map from lio_odom_alignment.py).
        auto_start:=false waits for  ros2 topic pub -1 /start_exploration std_msgs/msg/Bool "{data: true}".
        ros2 topic pub -1 /reset_waypoint std_msgs/msg/Empty "{}" stops the robot where it is (TARE waypoint = robot position).
        save_graph: far_planner runs along only to build its visibility graph, saved as graph_name next to map_name when
-       the exploration ends, then stopped; far_planner_launch.xml loads it in the next missions. -->
+       the exploration ends, then stopped; far_planner_launch.xml loads it in the next missions. It reads its own
+       terrain maps (/terrain_map_static, /terrain_map_ext_static), made from /registered_scan_static: the graph is
+       for later, the people walking by now must not be in it. -->
   <arg name="use_sim_time" default="true"/>
   <arg name="terrain" default="true" description="Run terrainAnalysis and terrainAnalysisExt (false if already running)"/>
   <arg name="rviz" default="true"/>
@@ -31,14 +34,18 @@
 
   <!-- carveDyObs (local patch): stored obstacle points that rays of the current scan now pass through are deleted, so
        people and other things that moved away leave no ghosts in /terrain_map (and in /terrain_map_ext, which takes
-       /terrain_map within 4 m). clearDyObs stays off: its fixed vertical FOV does not fit the upside-down L2. -->
+       /terrain_map within 4 m). clearDyObs stays off: its vertical FOV params are not tuned for the pitched Airy dome.
+       legged_gazebo/config/terrain_airy.yaml: floor prior and obstacle band for a lidar that does not see the floor
+       around the robot. -->
   <node if="$(var terrain)" pkg="terrain_analysis" exec="terrainAnalysis" name="terrainAnalysis" output="screen">
+    <param from="$(find-pkg-share legged_gazebo)/config/terrain_airy.yaml"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="carveDyObs" value="true"/>
     <remap from="/state_estimation" to="/Odometry"/>
     <remap from="/registered_scan" to="/cloud_registered"/>
   </node>
   <node if="$(var terrain)" pkg="terrain_analysis_ext" exec="terrainAnalysisExt" name="terrainAnalysisExt" output="screen">
+    <param from="$(find-pkg-share legged_gazebo)/config/terrain_airy.yaml"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <remap from="/state_estimation" to="/Odometry"/>
     <remap from="/registered_scan" to="/cloud_registered"/>
@@ -51,15 +58,37 @@
     <param name="kAutoStart" value="$(var auto_start)"/>
   </node>
 
+  <!-- Terrain maps for far_planner only, from the scans without the tracked people (people_perception
+       dynamic_points_filter; the same scans as /cloud_registered when people:=false). The terrain maps above keep the
+       people, TARE and the goal bridge must not walk into them; in the graph FAR saves for the next missions a person
+       walking by became a wall along the whole walk. Namespace far_static: the node names, which key
+       terrain_airy.yaml, stay the same. -->
+  <node if="$(var save_graph)" pkg="terrain_analysis" exec="terrainAnalysis" name="terrainAnalysis" namespace="far_static" output="screen">
+    <param from="$(find-pkg-share legged_gazebo)/config/terrain_airy.yaml"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="carveDyObs" value="true"/>
+    <remap from="/state_estimation" to="/Odometry"/>
+    <remap from="/registered_scan" to="/registered_scan_static"/>
+    <remap from="/terrain_map" to="/terrain_map_static"/>
+  </node>
+  <node if="$(var save_graph)" pkg="terrain_analysis_ext" exec="terrainAnalysisExt" name="terrainAnalysisExt" namespace="far_static" output="screen">
+    <param from="$(find-pkg-share legged_gazebo)/config/terrain_airy.yaml"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <remap from="/state_estimation" to="/Odometry"/>
+    <remap from="/registered_scan" to="/registered_scan_static"/>
+    <remap from="/terrain_map" to="/terrain_map_static"/>
+    <remap from="/terrain_map_ext" to="/terrain_map_ext_static"/>
+  </node>
+
   <!-- far_planner only builds its graph here: its /way_point (also sent on a graph reset, with the robot position) is
        remapped away from the goal bridges, which take TARE's. name must stay far_planner: the yaml is keyed by node name -->
   <node if="$(var save_graph)" pkg="far_planner" exec="far_planner" name="far_planner" output="screen">
     <param from="$(find-pkg-share far_planner)/config/$(var far_config).yaml"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <remap from="/odom_world" to="/Odometry"/>
-    <remap from="/terrain_cloud" to="/terrain_map_ext"/>
-    <remap from="/scan_cloud" to="/terrain_map"/>
-    <remap from="/terrain_local_cloud" to="/cloud_registered"/>
+    <remap from="/terrain_cloud" to="/terrain_map_ext_static"/>
+    <remap from="/scan_cloud" to="/terrain_map_static"/>
+    <remap from="/terrain_local_cloud" to="/registered_scan_static"/>
     <remap from="/way_point" to="/far_planner/way_point"/>
   </node>
   <node if="$(var save_graph)" pkg="graph_decoder" exec="graph_decoder" name="graph_decoder" output="screen">
