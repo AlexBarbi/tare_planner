@@ -28,7 +28,7 @@
   <arg name="graph_name" default="warehouse.vgh" description="FAR visibility graph file, in the SC-PGO save_directory"/>
   <arg name="far_config" default="default" description="Config file stem in far_planner/config"/>
 
-  <node pkg="legged_controllers" exec="lio_odom_alignment.py" name="lio_odom_alignment" output="screen">
+  <node pkg="fast_lio" exec="lio_odom_alignment.py" name="lio_odom_alignment" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
   <node pkg="tf2_ros" exec="static_transform_publisher" name="camera_init_to_map"
@@ -99,10 +99,10 @@
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
 
-  <node unless="$(var waypoint)" pkg="legged_controllers" exec="tare_path_to_opti_pessi_goal.py" name="tare_path_to_opti_pessi_goal" output="screen">
+  <node unless="$(var waypoint)" pkg="tare_planner" exec="tare_path_to_opti_pessi_goal.py" name="tare_path_to_opti_pessi_goal" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
-  <node if="$(var waypoint)" pkg="legged_controllers" exec="way_point_to_opti_pessi_goal.py" name="way_point_to_opti_pessi_goal" output="screen"/>
+  <node if="$(var waypoint)" pkg="tare_planner" exec="way_point_to_opti_pessi_goal.py" name="way_point_to_opti_pessi_goal" output="screen"/>
 
   <!-- On /exploration_finish: with return_home, first waits until TARE has brought the robot back to where it stood
        when this launch started (within 0.5 m, or return_home_timeout). Then SIGINT to tare_planner_node and the
@@ -112,7 +112,7 @@
        graph_decoder are stopped. Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
   <let name="finish_graph_name" value=""/>
   <let if="$(var save_graph)" name="finish_graph_name" value="$(var graph_name)"/>
-  <node if="$(var merge_map)" pkg="legged_controllers" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
+  <node if="$(var merge_map)" pkg="tare_planner" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
     <param name="map_name" value="$(var map_name)"/>
     <param name="graph_name" value="$(var finish_graph_name)"/>
     <param name="return_home" value="$(var return_home)"/>

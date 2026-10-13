@@ -140,6 +140,12 @@ install(TARGETS
   tare_planner_node
   DESTINATION lib/${PROJECT_NAME})
 
+install(PROGRAMS
+  scripts/tare_path_to_opti_pessi_goal.py
+  scripts/way_point_to_opti_pessi_goal.py
+  scripts/tare_finish_merge_map.py
+  DESTINATION lib/${PROJECT_NAME})
+
 install(FILES
   or-tools/lib/libortools.so.9
   or-tools/lib/libortools.so.9.8.3296
