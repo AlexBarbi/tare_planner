@@ -14,14 +14,21 @@ true from "Exploration completed, returning home" on), it
   2. stops the robot: a /opti_pessi/goal at its /odom position (OptiPessi stands at a reached goal), sent again every
      tick until the merge starts, in case a bridge tick raced the SIGINT;
   3. after flush_time, once SC-PGO (pgo_node) has rewritten its pose files (1 Hz) with the last keyframes, runs
-     makeMergedMap.py <save_directory> --no-vis --output <map_name> with the python that has open3d, its output going
-     to <map_name stem>.log next to the map;
+     makeMergedMap.py <save_directory> --no-vis --output <map_name> --dynamic-output <map_name stem>_dynamic.pcd with
+     the python that has open3d, its output going to <map_name stem>.log next to the map. The merge leaves out what
+     moved (people the people filter missed, carts): points other keyframes saw through (dynamic_removal.py next to
+     it); the _dynamic.pcd holds them;
   4. at the same time, when graph_name is set, saves far_planner's visibility graph next to the map: publishes
      <save_directory>/<graph_name> on /save_file_dir (graph_decoder writes the last /robot_vgraph there), waits for the
      file, then sends SIGINT to graph_nodes (far_planner, graph_decoder; SIGTERM after flush_time). far_planner runs
      during the exploration only to build that graph (its /way_point remapped away from the goal bridges);
      far_load_graph.py loads it in the next missions;
-  5. exits when the merge and the graph save end (a merge already started when this node is stopped still finishes).
+  5. with prune_graph, once both are done, runs pruneFarGraph.py <graph> <map> <map_name stem>_dynamic.pcd (next to
+     makeMergedMap.py): the obstacle nodes far_planner made of people that walked by go (the graph had them, its
+     terrain maps saw them); the graph as saved stays as <graph_name stem>_unpruned.vgh, the log is
+     <graph_name stem>_prune.log;
+  6. exits when the merge, the graph save and its pruning end (a merge already started when this node is stopped
+     still finishes).
      FAST-LIO and SC-PGO keep running.
 
 Empty save_directory, python and merge_script (the defaults) mean: SC-PGO's save_directory parameter (a relative one
@@ -90,8 +97,12 @@ class TareFinishMergeMap(Node):
         self.graph_name = self.declare_parameter("graph_name", "warehouse.vgh").value
         self.graph_nodes = self.declare_parameter("graph_nodes", ["far_planner", "graph_decoder"]).value
         self.graph_timeout = self.declare_parameter("graph_timeout", 10.0).value
+        self.prune_graph = self.declare_parameter("prune_graph", True).value
+        self.prune_script = self.declare_parameter("prune_script", "").value
         self.return_home = self.declare_parameter("return_home", True).value
-        self.home_tolerance = self.declare_parameter("home_tolerance", 0.5).value
+        # 1.0: TARE calls the robot home ~0.5 m short of where it started (0.53 m in the empty room, 2026-11-10), and
+        # the lidar pose compared here is 0.29 m ahead of the body: a robot back but turned is up to 0.58 m off
+        self.home_tolerance = self.declare_parameter("home_tolerance", 1.0).value
         # dynamic typing: a launch argument like return_home_timeout:=300 arrives as an int
         self.return_home_timeout = float(self.declare_parameter(
             "return_home_timeout", 600.0, ParameterDescriptor(dynamic_typing=True)).value)
@@ -101,7 +112,9 @@ class TareFinishMergeMap(Node):
             self.python = self.python or str(root / ".venv-yolo" / "bin" / "python")
             self.merge_script = self.merge_script or str(
                 root / "src" / "FAST_LIO_SLAM_ROS2" / "SC_PGO_ROS2" / "utils" / "python" / "makeMergedMap.py")
-        for name, path in (("python", self.python), ("merge_script", self.merge_script)):
+        self.prune_script = self.prune_script or os.path.join(os.path.dirname(self.merge_script), "pruneFarGraph.py")
+        for name, path in (("python", self.python), ("merge_script", self.merge_script),
+                           ("prune_script", self.prune_script if self.prune_graph and self.graph_name else self.python)):
             if not os.path.isfile(path):
                 self.get_logger().error(f"{name} '{path}' not found: the map will not be merged")
 
@@ -123,11 +136,17 @@ class TareFinishMergeMap(Node):
         self.stop_goal = None
         self.merge = None
         self.map_path = None
+        self.dynamic_path = None
+        self.merged = False
         # graph save: idle -> saving -> stopping -> done (done at once without graph_name)
         self.graph_state = "idle" if self.graph_name else "done"
         self.graph_path = None
         self.graph_since = None
         self.graph_size = -1
+        self.graph_saved = False
+        # graph pruning, after the merge and the graph save: idle -> pruning -> done
+        self.prune_state = "idle" if self.prune_graph and self.graph_name else "done"
+        self.prune = None
         self.create_timer(0.5, self.tick)
         where = self.save_directory or f"{self.pgo_node}'s save_directory"
         then = "the robot back home, then " if self.return_home else ""
@@ -177,7 +196,7 @@ class TareFinishMergeMap(Node):
             self.save_directory_future = self.pgo_params.get_parameters(["save_directory"])
 
     def finished(self):
-        return self.state == "done" and self.graph_state == "done"
+        return self.state == "done" and self.graph_state == "done" and self.prune_state == "done"
 
     def signal_nodes(self, sig, names=None):
         for name in self.stop_nodes if names is None else names:
@@ -214,7 +233,9 @@ class TareFinishMergeMap(Node):
             return False
         self.map_path = os.path.join(directory, self.map_name)
         log_path = os.path.splitext(self.map_path)[0] + ".log"
-        command = [self.python, self.merge_script, directory, "--no-vis", "--output", self.map_name]
+        self.dynamic_path = os.path.splitext(self.map_path)[0] + "_dynamic.pcd"
+        command = [self.python, self.merge_script, directory, "--no-vis", "--output", self.map_name,
+                   "--dynamic-output", self.dynamic_path]
         self.get_logger().info(f"merging the map: {' '.join(command)} (output in {log_path})")
         try:
             # Its own session: a Ctrl-C on the launch does not reach it, so a started merge still saves the map
@@ -227,6 +248,10 @@ class TareFinishMergeMap(Node):
 
     def tick(self):
         self.tick_graph()
+        self.tick_state()
+        self.tick_prune()
+
+    def tick_state(self):
         if self.state == "returning":
             distance, waited = self.home_distance(), time.monotonic() - self.return_since
             if distance <= self.home_tolerance:
@@ -254,6 +279,7 @@ class TareFinishMergeMap(Node):
             if code == 0 and os.path.isfile(self.map_path):
                 size = os.path.getsize(self.map_path) / 1e6
                 self.get_logger().info(f"map saved: {self.map_path} ({size:.1f} MB)")
+                self.merged = True
             else:
                 self.get_logger().error(f"merge failed (exit code {code}), see "
                                         f"{os.path.splitext(self.map_path)[0]}.log")
@@ -283,6 +309,7 @@ class TareFinishMergeMap(Node):
                 with open(self.graph_path) as f:
                     nodes = sum(1 for _ in f)
                 self.get_logger().info(f"FAR graph saved: {self.graph_path} ({nodes} nodes)")
+                self.graph_saved = True
             elif time.monotonic() - self.graph_since < self.graph_timeout:
                 self.graph_size = size
                 return
@@ -294,6 +321,38 @@ class TareFinishMergeMap(Node):
         elif self.graph_state == "stopping" and time.monotonic() - self.graph_since >= self.flush_time:
             self.signal_nodes(signal.SIGTERM, self.graph_nodes)
             self.graph_state = "done"
+
+    def tick_prune(self):
+        if self.prune_state == "idle":
+            if self.state != "done" or self.graph_state != "done":
+                return
+            if not (self.merged and self.graph_saved and os.path.isfile(self.dynamic_path)):
+                self.get_logger().warn("no merged map or no FAR graph: the graph is not pruned")
+                self.prune_state = "done"
+                return
+            log_path = os.path.splitext(self.graph_path)[0] + "_prune.log"
+            command = [self.python, self.prune_script, self.graph_path, self.map_path, self.dynamic_path]
+            self.get_logger().info(f"pruning the FAR graph: {' '.join(command)} (output in {log_path})")
+            try:
+                with open(log_path, "w") as log:
+                    self.prune = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as e:
+                self.get_logger().error(f"cannot run the graph pruning: {e}")
+                self.prune_state = "done"
+                return
+            self.prune_state = "pruning"
+        elif self.prune_state == "pruning":
+            code = self.prune.poll()
+            if code is None:
+                return
+            if code == 0:
+                with open(self.graph_path) as f:
+                    nodes = sum(1 for _ in f)
+                self.get_logger().info(f"FAR graph pruned: {self.graph_path} ({nodes} nodes)")
+            else:
+                self.get_logger().error(f"graph pruning failed (exit code {code}), the graph is as far_planner saved "
+                                        f"it; see {os.path.splitext(self.graph_path)[0]}_prune.log")
+            self.prune_state = "done"
 
 
 def main():

@@ -156,3 +156,80 @@ def test_after_the_stop_the_merge_starts_as_before(finish):
 
     assert (signal.SIGTERM, None) in f.signals
     assert f.node.finished()  # start_merge and the graph save are stubbed out: nothing left to wait for
+
+
+class FakeProcess:
+    def __init__(self, code=0):
+        self.code = code
+        self.pid = 4242
+
+    def poll(self):
+        return self.code
+
+
+def merged_and_saved(f, tmp_path, merge_code=0):
+    """start_merge and the graph save stubbed as if both had written their files in tmp_path."""
+    def start_merge():
+        f.node.map_path = str(tmp_path / 'optimized_map.pcd')
+        f.node.dynamic_path = str(tmp_path / 'optimized_map_dynamic.pcd')
+        for path in (f.node.map_path, f.node.dynamic_path):
+            open(path, 'w').close()
+        f.node.merge = FakeProcess(merge_code)
+        return True
+
+    def start_graph_save():
+        f.node.graph_path = str(tmp_path / 'warehouse.vgh')
+        with open(f.node.graph_path, 'w') as graph:
+            graph.write('2 3 0 0 0 0 0 0 0 0 0 1 0 1 0 | | | \n')
+        f.node.graph_saved = True
+        f.node.graph_state = 'done'
+
+    f.node.start_merge = start_merge
+    f.node.start_graph_save = start_graph_save
+
+
+def run_to_the_end(f):
+    f.robot_at(0.0, 0.0)
+    f.exploration_finished()
+    f.tick()
+    for _ in range(4):
+        f.tick(6.0)
+
+
+def test_the_graph_is_pruned_with_the_merged_map_and_its_dynamic_points(finish, tmp_path, monkeypatch):
+    f = finish()
+    merged_and_saved(f, tmp_path)
+    started = []
+    monkeypatch.setattr(script.subprocess, 'Popen', lambda command, **kwargs: started.append(command) or FakeProcess())
+
+    run_to_the_end(f)
+
+    assert len(started) == 1
+    assert started[0][1].endswith('pruneFarGraph.py')
+    assert started[0][2:] == [str(tmp_path / 'warehouse.vgh'), str(tmp_path / 'optimized_map.pcd'),
+                              str(tmp_path / 'optimized_map_dynamic.pcd')]
+    assert os.path.isfile(tmp_path / 'warehouse_prune.log')
+    assert f.node.finished()
+
+
+def test_no_pruning_when_the_merge_failed(finish, tmp_path, monkeypatch):
+    f = finish()
+    merged_and_saved(f, tmp_path, merge_code=1)
+    started = []
+    monkeypatch.setattr(script.subprocess, 'Popen', lambda command, **kwargs: started.append(command) or FakeProcess())
+
+    run_to_the_end(f)
+
+    assert started == []
+    assert f.node.finished()
+
+
+def test_a_failed_pruning_still_ends_the_node(finish, tmp_path, monkeypatch):
+    f = finish()
+    merged_and_saved(f, tmp_path)
+    monkeypatch.setattr(script.subprocess, 'Popen', lambda command, **kwargs: FakeProcess(code=2))
+
+    run_to_the_end(f)
+
+    assert f.node.prune_state == 'done'
+    assert f.node.finished()
