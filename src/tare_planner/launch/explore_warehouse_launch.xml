@@ -2,7 +2,8 @@
   <!-- Terrain analysis + TARE exploration on top of fast_lio_slam_launch.xml, driving OptiPessiController, with one rviz
        showing robot, LIO, terrain, exploration and OptiPessi plans. Start it after fast_lio_slam_launch.xml, once the
        robot stands (OptiPessi stands until the first goal).
-       Topics: TARE reads /Odometry (FAST-LIO), /registered_scan_static (FAST-LIO /cloud_registered through people_perception
+       Topics: TARE reads /lio_base_odometry (FAST-LIO /Odometry moved from the lidar to the base by lio_base_odometry.py,
+               where the goal bridge and the controller place the robot too), /registered_scan_static (FAST-LIO /cloud_registered through people_perception
                dynamic_points_filter, which fast_lio_slam_launch.xml starts), /terrain_map, /terrain_map_ext
                (tare_planner/config/aliengo.yaml) and publishes /way_point, /exploration_path, /global_path_full
                (frame map). tare_path_to_opti_pessi_goal.py does not relay /way_point: it sends /opti_pessi/goal (odom)
@@ -34,6 +35,12 @@
   </node>
   <node pkg="tf2_ros" exec="static_transform_publisher" name="camera_init_to_map"
     args="--frame-id camera_init --child-frame-id map"/>
+  <!-- /Odometry is the lidar, 0.29 m ahead of the base: TARE and the finish node take the base (aliengo.yaml
+       sub_state_estimation_topic_, tare_finish_merge_map.py odometry_topic). The terrain maps and far_planner keep
+       /Odometry: terrainAnalysis' carveDyObs casts the scan rays from it. -->
+  <node pkg="tare_planner" exec="lio_base_odometry.py" name="lio_base_odometry" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
 
   <!-- carveDyObs (local patch): stored obstacle points that rays of the current scan now pass through are deleted, so
        people and other things that moved away leave no ghosts in /terrain_map (and in /terrain_map_ext, which takes

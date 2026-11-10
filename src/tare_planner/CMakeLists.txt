@@ -144,6 +144,7 @@ install(PROGRAMS
   scripts/tare_path_to_opti_pessi_goal.py
   scripts/way_point_to_opti_pessi_goal.py
   scripts/tare_finish_merge_map.py
+  scripts/lio_base_odometry.py
   DESTINATION lib/${PROJECT_NAME})
 
 install(FILES

@@ -4,9 +4,9 @@ tare_finish_merge_map.py (ROS 2 Python)
 
 Ends a TARE exploration unattended. Once TARE reports the exploration finished (/exploration_finish, std_msgs/Bool,
 true from "Exploration completed, returning home" on), it
-  0. with return_home, lets TARE and the goal bridge walk the robot back home first: home is where FAST-LIO
-     (/Odometry) had the robot when this node started, which is TARE's home when both come from the same launch with
-     the robot standing. It goes on when the robot is within home_tolerance of it (on the floor: FAST-LIO drifts in
+  0. with return_home, lets TARE and the goal bridge walk the robot back home first: home is where FAST-LIO had the
+     robot's base (odometry_topic, /lio_base_odometry from lio_base_odometry.py, the topic TARE plans with) when this
+     node started, which is TARE's home when both come from the same launch with the robot standing. It goes on when the robot is within home_tolerance of it (on the floor: FAST-LIO drifts in
      z), or after return_home_timeout, wherever the robot is then. SC-PGO and far_planner keep mapping on the way.
      Without return_home it goes on at once, where the exploration ended;
   1. sends SIGINT to the nodes in stop_nodes (TARE and the goal bridges): TARE would go on sending its home
@@ -100,8 +100,7 @@ class TareFinishMergeMap(Node):
         self.prune_graph = self.declare_parameter("prune_graph", True).value
         self.prune_script = self.declare_parameter("prune_script", "").value
         self.return_home = self.declare_parameter("return_home", True).value
-        # 1.0: TARE calls the robot home ~0.5 m short of where it started (0.53 m in the empty room, 2026-11-10), and
-        # the lidar pose compared here is 0.29 m ahead of the body: a robot back but turned is up to 0.58 m off
+        # 1.0: TARE calls the robot home ~0.5 m short of where it started (0.53 m in the empty room, 2026-11-10)
         self.home_tolerance = self.declare_parameter("home_tolerance", 1.0).value
         # dynamic typing: a launch argument like return_home_timeout:=300 arrives as an int
         self.return_home_timeout = float(self.declare_parameter(
@@ -120,10 +119,13 @@ class TareFinishMergeMap(Node):
 
         self.odom = None
         self.create_subscription(Odometry, "/odom", lambda msg: setattr(self, "odom", msg), 5)
-        # FAST-LIO, the frame TARE plans in: where home is and how far the robot is from it
+        # FAST-LIO at the base, as TARE takes it (its sub_state_estimation_topic_): where home is and how far the robot
+        # is from it. Not /Odometry, the lidar, 0.29 m ahead of the base: a robot home but turned round was up to
+        # 0.58 m off there.
+        self.odometry_topic = self.declare_parameter("odometry_topic", "/lio_base_odometry").value
         self.home = None
         self.position = None
-        self.create_subscription(Odometry, "/Odometry", self.on_lio_odometry, 5)
+        self.create_subscription(Odometry, self.odometry_topic, self.on_lio_odometry, 5)
         self.create_subscription(Bool, "/exploration_finish", self.on_exploration_finish, 5)
         self.goal_pub = self.create_publisher(MarkerArray, "/opti_pessi/goal", 1)
         self.save_graph_pub = self.create_publisher(String, "/save_file_dir", 5)
@@ -164,7 +166,7 @@ class TareFinishMergeMap(Node):
         if not msg.data or self.state != "exploring":
             return
         if self.return_home and self.home is None:
-            self.get_logger().warn("exploration finished, but no /Odometry: home unknown, ending it here")
+            self.get_logger().warn(f"exploration finished, but no {self.odometry_topic}: home unknown, ending it here")
         elif self.return_home and self.home_distance() > self.home_tolerance:
             self.get_logger().info(
                 f"exploration finished {self.home_distance():.1f} m from home ({self.home[0]:.2f}, {self.home[1]:.2f}): "

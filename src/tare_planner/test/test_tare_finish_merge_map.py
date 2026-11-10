@@ -233,3 +233,12 @@ def test_a_failed_pruning_still_ends_the_node(finish, tmp_path, monkeypatch):
 
     assert f.node.prune_state == 'done'
     assert f.node.finished()
+
+
+def test_home_comes_from_the_base_odometry_tare_plans_with(finish):
+    """TARE's home is the first pose on its sub_state_estimation_topic_ (/lio_base_odometry, the base): the same here,
+    not the lidar's /Odometry, 0.29 m ahead of the base, which put a robot home but turned round up to 0.58 m off."""
+    f = finish()
+    topics = {s.topic_name for s in f.node.subscriptions}
+    assert '/lio_base_odometry' in topics
+    assert '/Odometry' not in topics

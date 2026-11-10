@@ -31,7 +31,10 @@ tare_planner_node:
     sub_start_exploration_topic_ : /start_exploration
     sub_terrain_map_topic_ : /terrain_map
     sub_terrain_map_ext_topic_ : /terrain_map_ext
-    sub_state_estimation_topic_ : /Odometry
+    # FAST-LIO's /Odometry moved from the lidar to the base by lio_base_odometry.py (explore_warehouse_launch.xml): the
+    # goal bridge and the controller place the robot by its base, and a waypoint under the base that TARE measured
+    # 0.29 m off from the lidar stalled the robot for good (2026-11-10).
+    sub_state_estimation_topic_ : /lio_base_odometry
     # FAST-LIO /cloud_registered through people_perception dynamic_points_filter (started by fast_lio_slam_launch.xml):
     # coverage, keypose cloud and planning environment accumulate this cloud, so it comes without the tracked people.
     # The terrain maps above stay on the full cloud: they are the collision check.
