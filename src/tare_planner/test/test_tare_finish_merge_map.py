@@ -235,6 +235,25 @@ def test_a_failed_pruning_still_ends_the_node(finish, tmp_path, monkeypatch):
     assert f.node.finished()
 
 
+def test_the_stop_goal_keeps_the_robots_yaw(finish):
+    """acados turns to the yaw of its goal: the stop goal at the robot carries the robot's own yaw (a rotation about z
+    only, whatever roll and pitch /odom has), not the identity quaternion, which would turn it towards +x."""
+    import math
+    f = finish(return_home=False)
+    yaw, roll = 0.7, 0.05
+    # yaw then roll (ZYX): q = q_z(yaw) * q_x(roll)
+    cy, sy, cr, sr = math.cos(yaw / 2), math.sin(yaw / 2), math.cos(roll / 2), math.sin(roll / 2)
+    q = f.node.odom.pose.pose.orientation
+    q.w, q.x, q.y, q.z = cy * cr, cy * sr, sy * sr, sy * cr
+    f.exploration_finished()
+
+    marker = f.stop_goals[-1].markers[0]
+    assert marker.type == marker.ARROW
+    o = marker.pose.orientation
+    assert (o.x, o.y) == (0.0, 0.0)
+    assert (o.z, o.w) == pytest.approx((math.sin(yaw / 2), math.cos(yaw / 2)))
+
+
 def test_home_comes_from_the_base_odometry_tare_plans_with(finish):
     """TARE's home is the first pose on its sub_state_estimation_topic_ (/lio_base_odometry, the base): the same here,
     not the lidar's /Odometry, 0.29 m ahead of the base, which put a robot home but turned round up to 0.58 m off."""

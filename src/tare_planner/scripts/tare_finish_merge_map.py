@@ -182,15 +182,18 @@ class TareFinishMergeMap(Node):
         if self.odom is None:
             self.get_logger().warn("no /odom: the robot is not stopped, it walks on to the last goal")
         else:
+            # The robot's own yaw (about z only): acados turns to the yaw of its goal, w = 1 would turn it towards +x
+            q = self.odom.pose.pose.orientation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             marker = Marker()
             marker.header.frame_id = self.odom.header.frame_id
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "goal"
-            marker.type = Marker.SPHERE
+            marker.type = Marker.ARROW
             marker.action = Marker.ADD
             marker.pose.position = self.odom.pose.pose.position
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = marker.scale.y = marker.scale.z = 0.3
+            marker.pose.orientation.z, marker.pose.orientation.w = math.sin(0.5 * yaw), math.cos(0.5 * yaw)
+            marker.scale.x, marker.scale.y, marker.scale.z = 0.5, 0.1, 0.1
             marker.color.r, marker.color.a = 1.0, 1.0
             self.stop_goal = MarkerArray(markers=[marker])
             self.goal_pub.publish(self.stop_goal)
