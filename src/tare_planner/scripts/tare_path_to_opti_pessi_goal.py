@@ -32,6 +32,9 @@ direction (at a vertex the stretch after it, at the end the last stretch: see pa
 a detour the way from the robot to it; a stop, or the robot at the end of far_planner's route, keeps the robot's yaw
 (/odom). acados_legged_controller turns to it near the goal (useGoalYaw, its relay opti_pessi_goal_relay.py);
 OptiPessiController reads the position only.
+A yaw hint (/goal_yaw_hint, geometry_msgs/PoseStamped, latched here until replaced; an empty frame_id clears it)
+overrides that yaw for every goal within hint_radius of the hint's position: exit_inspection_pass.py sends one with
+each viewpoint, so the robot ends there facing the door. Nobody sends hints in the TARE exploration.
 
 Without a fresh /terrain_map nothing is checked: the path goal is taken, or else the midpoint. Until /way_point and
 /odom are fresh the last goal is kept. kExtendWayPoint must stay false in the TARE config (the path goal needs
@@ -56,7 +59,7 @@ Usage: ros2 run tare_planner tare_path_to_opti_pessi_goal.py --ros-args -p clear
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor
 from rclpy.duration import Duration
@@ -272,6 +275,7 @@ class TareGoalBridge(Node):
         number("reach_distance", 0.3, "goal distance at which the next candidate is taken at once [m]", 0.0, 2.0)
         number("republish_distance", 0.1, "goal change that is published [m]", 0.0, 1.0)
         number("republish_yaw", 0.1, "goal yaw change that is published, also at the same place [rad]", 0.0, 3.2)
+        number("hint_radius", 0.5, "goals this close to the /goal_yaw_hint position take its yaw [m]", 0.0, 5.0)
         number("input_timeout", 3.0, "age after which a path, /way_point, /odom or /terrain_map is ignored [s]", 0.1,
                60.0)
         self.goal_frame = self.declare_parameter("goal_frame", "odom").value
@@ -303,6 +307,8 @@ class TareGoalBridge(Node):
         self.create_subscription(PointStamped, "/way_point", keep("/way_point"), 5)
         self.create_subscription(Odometry, "/odom", keep("/odom"), 5)
         self.create_subscription(PointCloud2, "/terrain_map", keep_obstacles, 1)
+        self.hint = None  # last /goal_yaw_hint (PoseStamped), None when cleared
+        self.create_subscription(PoseStamped, "/goal_yaw_hint", self.on_hint, 5)
 
         self.goal = None  # (2,) in goal_frame, its yaw there, and where it comes from
         self.goal_yaw = None
@@ -316,6 +322,15 @@ class TareGoalBridge(Node):
 
     def param(self, name):
         return self.get_parameter(name).value
+
+    def on_hint(self, msg):
+        self.hint = msg if msg.header.frame_id else None
+        if self.hint is None:
+            self.get_logger().info("goal yaw hint cleared")
+        else:
+            p = msg.pose.position
+            self.get_logger().info(f"goal yaw hint at ({p.x:.2f}, {p.y:.2f}) in {msg.header.frame_id}: "
+                                   f"{np.degrees(yaw_of(msg.pose.orientation)):.0f} deg")
 
     def fresh(self, key):
         msg, received = self.inputs.get(key, (None, None))
@@ -413,8 +428,12 @@ class TareGoalBridge(Node):
         terrain = self.fresh("/terrain_map")
         p = odom.pose.pose.position
         paths = []  # (n, 3) in goal_frame
-        obstacles = route = waypoint = None
+        obstacles = route = waypoint = hint = None
         try:
+            if self.hint is not None:
+                h = self.hint.pose.position
+                hint = (self.to_goal_frame(self.hint.header.frame_id, np.array([[h.x, h.y, h.z]]))[0, :2],
+                        self.yaw_to_goal_frame(self.hint.header.frame_id, yaw_of(self.hint.pose.orientation)))
             robot = self.to_goal_frame(odom.header.frame_id, np.array([[p.x, p.y, p.z]]))[0]
             robot_yaw = self.yaw_to_goal_frame(odom.header.frame_id, yaw_of(odom.pose.pose.orientation))
             if route_msg is not None:
@@ -476,6 +495,8 @@ class TareGoalBridge(Node):
             if source != self.goal_source:
                 self.get_logger().info(f"goal from {source}")
             self.goal, self.goal_yaw, self.goal_source = candidate, candidate_yaw, source
+        if hint is not None and np.linalg.norm(self.goal - hint[0]) <= self.param("hint_radius"):
+            self.goal_yaw = hint[1]
 
         if (self.published_goal is not None
                 and np.linalg.norm(self.goal - self.published_goal) <= self.param("republish_distance")

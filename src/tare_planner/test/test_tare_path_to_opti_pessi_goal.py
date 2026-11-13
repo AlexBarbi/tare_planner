@@ -161,6 +161,13 @@ class Bridge:
         marker.header.frame_id = 'odom'
         self.put('/viz_path_topic', marker)
 
+    def hint(self, x, y, yaw, frame='odom'):
+        msg = PoseStamped()
+        msg.header.frame_id = frame
+        msg.pose.position.x, msg.pose.position.y = float(x), float(y)
+        msg.pose.orientation = yaw_quaternion(yaw)
+        self.node.on_hint(msg)
+
     def obstacles(self, *xy):
         self.node.inputs['/terrain_map'] = (('odom', np.array([(x, y, 0.5) for x, y in xy], dtype=float).reshape(-1, 3)),
                                            self.node.get_clock().now())
@@ -362,3 +369,43 @@ def test_a_yaw_change_alone_is_published_when_larger_than_republish_yaw(far):
     b.node.tick()
     assert len(b.goals) == 2
     assert b.yaw() == pytest.approx(1.3)
+
+
+# ---------------------------------------------------------------- goal yaw hint (exit inspection viewpoints)
+
+def test_a_goal_at_the_hint_takes_its_yaw_instead_of_the_route_direction(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (1.5, 0))  # the end of the route is within the lookahead: the goal is the viewpoint
+    b.obstacles()
+    assert b.goal() == ((1.5, 0.0), 'path')
+    assert b.yaw() == pytest.approx(0.0)
+    b.hint(1.5, 0.0, math.pi / 2)  # face the door on the left
+    b.goal()
+    assert b.yaw() == pytest.approx(math.pi / 2)
+
+
+def test_a_hint_far_from_the_goal_changes_nothing(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (10, 0))
+    b.obstacles()
+    b.hint(10.0, 0.0, math.pi / 2)
+    assert b.goal() == ((2.0, 0.0), 'path')
+    assert b.yaw() == pytest.approx(0.0)
+
+
+def test_standing_at_the_reached_viewpoint_the_robot_turns_to_the_hint(far):
+    b = far()
+    b.robot(5.0, 0.0, yaw=0.3)
+    b.far_route()  # far_planner reached the goal: no route, /way_point is the goal
+    b.way_point(5.0, 0.0)
+    b.obstacles()
+    b.goal()
+    assert b.yaw() == pytest.approx(0.3)  # without a hint: the robot's own yaw
+    b.hint(5.0, 0.0, -2.0)
+    b.goal()
+    assert b.yaw() == pytest.approx(-2.0)
+    b.hint(0.0, 0.0, 0.0, frame='')  # cleared
+    b.goal()
+    assert b.yaw() == pytest.approx(0.3)

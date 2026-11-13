@@ -29,6 +29,9 @@
   <arg name="graph_name" default="warehouse.vgh" description="FAR visibility graph file, in the SC-PGO save_directory"/>
   <arg name="prune_graph" default="true" description="With save_graph: take out of the saved graph the obstacles far_planner made of people that walked by (what the map merge found had moved); the graph as saved stays as &lt;graph_name stem&gt;_unpruned.vgh"/>
   <arg name="far_config" default="default" description="Config file stem in far_planner/config"/>
+  <arg name="exits" default="false" description="Emergency exits (package exit_inspection): exit sign detector + exit_landmark_mapper during the exploration, exits.yaml in the SC-PGO save_directory at the end (needs merge_map)"/>
+  <arg name="exit_sweep" default="true" description="With exits: when TARE has finished, walk the robot to viewpoints of the walls the camera has not looked at from far enough (exit signs hang 2.2-2.5 m up, the D435i sees them from ~6.8 m), then home (exit_inspection exit_sign_sweep.py), instead of TARE's return home"/>
+  <arg name="exit_sign_model" default="$(env HOME)/RaNAV/models/exit_sign/exit_sign_736x1280.onnx" description="With exits: ONNX export of the exit sign detector"/>
 
   <node pkg="fast_lio" exec="lio_odom_alignment.py" name="lio_odom_alignment" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
@@ -120,6 +123,8 @@
        With save_graph, the FAR graph is saved there too (/save_file_dir -> graph_decoder), then far_planner and
        graph_decoder are stopped; with prune_graph, pruneFarGraph.py then drops its obstacle nodes on the places where
        the merge found things that moved. Wall-time node: flush_time waits for SC-PGO's 1 Hz pose file rewrite. -->
+  <let name="finish_sweep" value="false"/>
+  <let if="$(var exits)" name="finish_sweep" value="$(var exit_sweep)"/>
   <let name="finish_graph_name" value=""/>
   <let if="$(var save_graph)" name="finish_graph_name" value="$(var graph_name)"/>
   <node if="$(var merge_map)" pkg="tare_planner" exec="tare_finish_merge_map.py" name="tare_finish_merge_map" output="screen">
@@ -128,7 +133,22 @@
     <param name="prune_graph" value="$(var prune_graph)"/>
     <param name="return_home" value="$(var return_home)"/>
     <param name="return_home_timeout" value="$(var return_home_timeout)"/>
+    <param name="exits" value="$(var exits)"/>
+    <param name="sweep" value="$(var finish_sweep)"/>
   </node>
+
+  <!-- With exits: exit sign landmarks (exit_inspection/launch/exit_detection_launch.xml); the sightings go to SC-PGO's
+       save_directory, finalize_exits.py turns them into exits.yaml when the finish node above has merged the map. -->
+  <include if="$(var exits)" file="$(find-pkg-share exit_inspection)/launch/exit_detection_launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="model" value="$(var exit_sign_model)"/>
+  </include>
+  <group if="$(var exits)">
+    <node if="$(var exit_sweep)" pkg="exit_inspection" exec="exit_sign_sweep.py" name="exit_sign_sweep" output="screen">
+      <param from="$(find-pkg-share exit_inspection)/config/exit_sign_sweep.yaml"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </node>
+  </group>
 
   <node if="$(var rviz)" pkg="rviz2" exec="rviz2" name="tare_nav_rviz"
     args="-d $(find-pkg-share tare_planner)/tare_planner_warehouse.rviz">
