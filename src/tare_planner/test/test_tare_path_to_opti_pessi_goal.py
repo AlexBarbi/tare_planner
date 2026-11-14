@@ -1,12 +1,14 @@
-"""Which /opti_pessi/goal tare_path_to_opti_pessi_goal.py picks when far_planner gives it a route (/viz_path_topic)."""
+"""Which /opti_pessi/goal tare_path_to_opti_pessi_goal.py picks when far_planner gives it a route (/viz_path_topic),
+and which yaw it gives it."""
 import importlib.util
+import math
 import os
 
 import numpy as np
 import pytest
 import rclpy
 from geometry_msgs.msg import Point, PointStamped
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Quaternion
 from nav_msgs.msg import Odometry, Path
 from visualization_msgs.msg import Marker
 
@@ -26,7 +28,22 @@ def route(*xy):
 
 
 def pursue(path, robot, lookahead=LOOKAHEAD):
-    return tuple(np.round(bridge.pursue(path, np.array(robot, dtype=float), lookahead, CHORD)[:2], 3))
+    return tuple(np.round(bridge.pursue(path, np.array(robot, dtype=float), lookahead, CHORD)[0][:2], 3))
+
+
+def pursue_yaw(path, robot, lookahead=LOOKAHEAD):
+    return bridge.pursue(path, np.array(robot, dtype=float), lookahead, CHORD)[1]
+
+
+def follow(path, robot, waypoint, lookahead=LOOKAHEAD):
+    """Goal (x, y) and yaw of the pure pursuit along a TARE path towards waypoint."""
+    goal, yaw = bridge.follow(path, np.array(robot, dtype=float), np.array(waypoint, dtype=float), lookahead, 0.3, 8.0,
+                              CHORD)
+    return tuple(np.round(goal[:2], 3)), yaw
+
+
+def yaw_quaternion(yaw):
+    return Quaternion(z=math.sin(0.5 * yaw), w=math.cos(0.5 * yaw))
 
 
 # ---------------------------------------------------------------- the point of the route to walk to
@@ -67,6 +84,39 @@ def test_a_route_that_comes_back_past_the_robot_is_followed_from_its_start():
     assert pursue(path, (0.0, 0.0)) == (2.0, 0.0)
 
 
+# ---------------------------------------------------------------- the yaw of a goal on a path
+
+def test_the_yaw_of_a_goal_on_a_route_is_the_direction_of_the_route_there():
+    assert pursue_yaw(route((0, 0), (10, 0)), (1.0, 0.0)) == pytest.approx(0.0)
+    assert pursue_yaw(route((0, 0), (0, 10)), (0.0, 1.0)) == pytest.approx(math.pi / 2)
+
+
+def test_a_goal_stopped_at_a_corner_faces_the_stretch_after_it():
+    # the robot turns there: facing where it goes next, not where it comes from
+    path = route((0, 0), (3, 0), (3, 5))
+    assert pursue(path, (2.0, 0.0)) == (3.0, 0.0)
+    assert pursue_yaw(path, (2.0, 0.0)) == pytest.approx(math.pi / 2)
+
+
+def test_a_goal_at_the_end_of_the_route_faces_its_last_stretch():
+    assert pursue_yaw(route((0, 0), (1.2, 0)), (0.0, 0.0)) == pytest.approx(0.0)
+    path = route((0, 0), (1, 0), (1, 1))
+    assert pursue(path, (1.0, 0.9)) == (1.0, 1.0)
+    assert pursue_yaw(path, (1.0, 0.9)) == pytest.approx(math.pi / 2)
+
+
+def test_a_tare_path_walked_backwards_gives_the_walking_direction():
+    # TARE's path can lead from the waypoint to the robot: the robot walks it from its end to its start
+    assert follow(route((0, 0), (4, 0)), (4.0, 0.0), (0.0, 0.0)) == ((2.0, 0.0), pytest.approx(math.pi))
+
+
+def test_a_corner_of_a_tare_path_walked_backwards_faces_the_stretch_after_it_in_walking_order():
+    path = route((0, 0), (0, 3), (4, 3))
+    goal, yaw = follow(path, (1.0, 3.0), (0.0, 0.0))
+    assert goal == (0.0, 3.0)
+    assert yaw == pytest.approx(-math.pi / 2)
+
+
 # ---------------------------------------------------------------- the node
 
 class Bridge:
@@ -84,10 +134,11 @@ class Bridge:
     def put(self, key, msg):
         self.node.inputs[key] = (msg, self.node.get_clock().now())
 
-    def robot(self, x, y):
+    def robot(self, x, y, yaw=0.0):
         odom = Odometry()
         odom.header.frame_id = 'odom'
         odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z = float(x), float(y), 0.4
+        odom.pose.pose.orientation = yaw_quaternion(yaw)
         self.put('/odom', odom)
 
     def way_point(self, x, y):
@@ -110,6 +161,13 @@ class Bridge:
         marker.header.frame_id = 'odom'
         self.put('/viz_path_topic', marker)
 
+    def hint(self, x, y, yaw, frame='odom'):
+        msg = PoseStamped()
+        msg.header.frame_id = frame
+        msg.pose.position.x, msg.pose.position.y = float(x), float(y)
+        msg.pose.orientation = yaw_quaternion(yaw)
+        self.node.on_hint(msg)
+
     def obstacles(self, *xy):
         self.node.inputs['/terrain_map'] = (('odom', np.array([(x, y, 0.5) for x, y in xy], dtype=float).reshape(-1, 3)),
                                            self.node.get_clock().now())
@@ -121,6 +179,17 @@ class Bridge:
         marker = self.goals[-1]
         source = {tuple(c): s for s, c in bridge.COLORS.items()}[(marker.color.r, marker.color.g, marker.color.b)]
         return (round(marker.pose.position.x, 2), round(marker.pose.position.y, 2)), source
+
+    def yaw(self):
+        """Yaw of the last goal published (its orientation must be a rotation about z only)."""
+        q = self.goals[-1].pose.orientation
+        assert (q.x, q.y) == (0.0, 0.0)
+        assert q.z ** 2 + q.w ** 2 == pytest.approx(1.0)
+        return math.atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z ** 2)
+
+    def ring(self, radius=0.4):
+        """Obstacles all round the robot at (0, 0): no way out, the robot stops."""
+        self.obstacles(*[(radius * math.cos(a), radius * math.sin(a)) for a in np.radians(np.arange(0, 360, 5))])
 
 
 @pytest.fixture
@@ -208,3 +277,135 @@ def test_with_tare_the_path_is_still_taken_only_when_the_straight_way_to_the_way
 
     b.obstacles((2.0, 0.0))
     assert b.goal() == ((0.0, 1.5), 'path')  # the first corner of the path: no cutting it
+
+
+# ---------------------------------------------------------------- the yaw of the goal published
+
+def test_a_goal_on_a_tare_path_faces_the_path_not_the_line_from_the_robot(far):
+    b = far(far_path=False)
+    b.robot(0.0, 0.0)
+    b.tare_path((0, 0), (0, 1.5), (-4, 1.5), (-4, 0))  # round something between the robot and a waypoint to the west
+    b.way_point(-4.0, 0.0)
+    b.obstacles((-2.0, 0.0))
+
+    assert b.goal() == ((0.0, 1.5), 'path')
+    assert abs(b.yaw()) == pytest.approx(math.pi)  # the stretch after the corner, the line robot -> goal is pi/2
+
+
+def test_a_goal_on_far_planners_route_faces_the_route(far):
+    b = far()
+    b.robot(2.0, 0.0)
+    b.far_route((0, 0), (3, 0), (3, 5))
+    b.obstacles()
+
+    assert b.goal() == ((3.0, 0.0), 'path')
+    assert b.yaw() == pytest.approx(math.pi / 2)
+
+
+def test_a_midpoint_goal_faces_the_way_point(far):
+    b = far(far_path=False)
+    b.robot(0.0, 0.0, yaw=2.5)
+    b.way_point(0.0, 4.0)
+    b.obstacles()
+
+    assert b.goal() == ((0.0, 2.0), 'midpoint')
+    assert b.yaw() == pytest.approx(math.pi / 2)
+
+
+def test_a_detour_goal_faces_the_way_from_the_robot_to_it(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (10, 0))
+    b.obstacles((0.5, 0.0))
+
+    (x, y), source = b.goal()
+    assert source == 'detour'
+    assert b.yaw() == pytest.approx(math.atan2(y, x), abs=0.01)
+
+
+def test_a_stopped_robot_keeps_its_own_yaw(far):
+    b = far()
+    b.robot(0.0, 0.0, yaw=1.0)
+    b.far_route((0, 0), (10, 0))
+    b.ring()
+
+    assert b.goal() == ((0.0, 0.0), 'stop')
+    assert b.yaw() == pytest.approx(1.0)
+
+
+def test_a_robot_at_the_end_of_far_planners_route_keeps_its_own_yaw(far):
+    b = far()
+    b.robot(1.0, 1.0, yaw=-2.0)
+    b.far_route((1, 1), (1, 1))  # far_planner's route once the robot is at its goal
+    b.obstacles()
+
+    assert b.goal() == ((1.0, 1.0), 'path')
+    assert b.yaw() == pytest.approx(-2.0)
+
+
+def test_the_goal_is_an_arrow(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (10, 0))
+    b.obstacles()
+    b.goal()
+
+    assert b.goals[-1].type == Marker.ARROW
+
+
+def test_a_yaw_change_alone_is_published_when_larger_than_republish_yaw(far):
+    b = far()
+    b.far_route((0, 0), (10, 0))
+    b.ring()
+    b.robot(0.0, 0.0, yaw=1.0)
+    b.node.tick()
+    assert len(b.goals) == 1
+
+    b.robot(0.0, 0.0, yaw=1.05)  # a standing robot's yaw noise: same goal
+    b.node.tick()
+    assert len(b.goals) == 1
+
+    b.robot(0.0, 0.0, yaw=1.3)
+    b.node.tick()
+    assert len(b.goals) == 2
+    assert b.yaw() == pytest.approx(1.3)
+
+
+# ---------------------------------------------------------------- goal yaw hint (exit inspection viewpoints)
+
+def test_a_goal_at_the_hint_takes_its_yaw_instead_of_the_route_direction(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (1.5, 0))  # the end of the route is within the lookahead: the goal is the viewpoint
+    b.obstacles()
+    assert b.goal() == ((1.5, 0.0), 'path')
+    assert b.yaw() == pytest.approx(0.0)
+    b.hint(1.5, 0.0, math.pi / 2)  # face the door on the left
+    b.goal()
+    assert b.yaw() == pytest.approx(math.pi / 2)
+
+
+def test_a_hint_far_from_the_goal_changes_nothing(far):
+    b = far()
+    b.robot(0.0, 0.0)
+    b.far_route((0, 0), (10, 0))
+    b.obstacles()
+    b.hint(10.0, 0.0, math.pi / 2)
+    assert b.goal() == ((2.0, 0.0), 'path')
+    assert b.yaw() == pytest.approx(0.0)
+
+
+def test_standing_at_the_reached_viewpoint_the_robot_turns_to_the_hint(far):
+    b = far()
+    b.robot(5.0, 0.0, yaw=0.3)
+    b.far_route()  # far_planner reached the goal: no route, /way_point is the goal
+    b.way_point(5.0, 0.0)
+    b.obstacles()
+    b.goal()
+    assert b.yaw() == pytest.approx(0.3)  # without a hint: the robot's own yaw
+    b.hint(5.0, 0.0, -2.0)
+    b.goal()
+    assert b.yaw() == pytest.approx(-2.0)
+    b.hint(0.0, 0.0, 0.0, frame='')  # cleared
+    b.goal()
+    assert b.yaw() == pytest.approx(0.3)

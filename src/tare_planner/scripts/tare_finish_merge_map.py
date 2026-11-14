@@ -4,24 +4,38 @@ tare_finish_merge_map.py (ROS 2 Python)
 
 Ends a TARE exploration unattended. Once TARE reports the exploration finished (/exploration_finish, std_msgs/Bool,
 true from "Exploration completed, returning home" on), it
-  0. with return_home, lets TARE and the goal bridge walk the robot back home first: home is where FAST-LIO
-     (/Odometry) had the robot when this node started, which is TARE's home when both come from the same launch with
-     the robot standing. It goes on when the robot is within home_tolerance of it (on the floor: FAST-LIO drifts in
+  0. with return_home, lets TARE and the goal bridge walk the robot back home first: home is where FAST-LIO had the
+     robot's base (odometry_topic, /lio_base_odometry from lio_base_odometry.py, the topic TARE plans with) when this
+     node started, which is TARE's home when both come from the same launch with the robot standing. It goes on when the robot is within home_tolerance of it (on the floor: FAST-LIO drifts in
      z), or after return_home_timeout, wherever the robot is then. SC-PGO and far_planner keep mapping on the way.
-     Without return_home it goes on at once, where the exploration ended;
+     Without return_home it goes on at once, where the exploration ended.
+     With sweep (exit_inspection, explore_warehouse_launch.xml exits:=true), instead: stops TARE and its goal bridge at
+     once and sends /exit_inspection/start_sweep (YAML: home x, y, yaw); exit_sign_sweep.py walks the robot to the
+     viewpoints of the exit signs the camera has not looked at and then home, and answers /exit_inspection/sweep_done.
+     It goes on then, or after sweep_timeout (sweep_nodes get SIGINT). Nobody listening on start_sweep: as without;
   1. sends SIGINT to the nodes in stop_nodes (TARE and the goal bridges): TARE would go on sending its home
      waypoint; the ones still alive after flush_time get SIGTERM;
   2. stops the robot: a /opti_pessi/goal at its /odom position (OptiPessi stands at a reached goal), sent again every
      tick until the merge starts, in case a bridge tick raced the SIGINT;
   3. after flush_time, once SC-PGO (pgo_node) has rewritten its pose files (1 Hz) with the last keyframes, runs
-     makeMergedMap.py <save_directory> --no-vis --output <map_name> with the python that has open3d, its output going
-     to <map_name stem>.log next to the map;
+     makeMergedMap.py <save_directory> --no-vis --output <map_name> --dynamic-output <map_name stem>_dynamic.pcd with
+     the python that has open3d, its output going to <map_name stem>.log next to the map. The merge leaves out what
+     moved (people the people filter missed, carts): points other keyframes saw through (dynamic_removal.py next to
+     it); the _dynamic.pcd holds them;
   4. at the same time, when graph_name is set, saves far_planner's visibility graph next to the map: publishes
      <save_directory>/<graph_name> on /save_file_dir (graph_decoder writes the last /robot_vgraph there), waits for the
      file, then sends SIGINT to graph_nodes (far_planner, graph_decoder; SIGTERM after flush_time). far_planner runs
      during the exploration only to build that graph (its /way_point remapped away from the goal bridges);
      far_load_graph.py loads it in the next missions;
-  5. exits when the merge and the graph save end (a merge already started when this node is stopped still finishes).
+  5. with prune_graph, once both are done, runs pruneFarGraph.py <graph> <map> <map_name stem>_dynamic.pcd (next to
+     makeMergedMap.py): the obstacle nodes far_planner made of people that walked by go (the graph had them, its
+     terrain maps saw them); the graph as saved stays as <graph_name stem>_unpruned.vgh, the log is
+     <graph_name stem>_prune.log;
+  6. with exits, once the merge has ended (SC-PGO's pose files are final then), runs finalize_exits.py
+     <save_directory> (package exit_inspection): the exit sign sightings of exit_landmark_mapper re-anchored on the
+     optimized poses, written to <save_directory>/exit_inspection/exits.yaml; log exit_inspection/finalize.log;
+  7. exits when the merge, the graph save, its pruning and the exits end (a merge already started when this node is
+     stopped still finishes).
      FAST-LIO and SC-PGO keep running.
 
 Empty save_directory, python and merge_script (the defaults) mean: SC-PGO's save_directory parameter (a relative one
@@ -36,6 +50,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -46,6 +61,7 @@ from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter_client import AsyncParameterClient
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -90,44 +106,86 @@ class TareFinishMergeMap(Node):
         self.graph_name = self.declare_parameter("graph_name", "warehouse.vgh").value
         self.graph_nodes = self.declare_parameter("graph_nodes", ["far_planner", "graph_decoder"]).value
         self.graph_timeout = self.declare_parameter("graph_timeout", 10.0).value
+        self.prune_graph = self.declare_parameter("prune_graph", True).value
+        self.prune_script = self.declare_parameter("prune_script", "").value
+        # exit_inspection: exit sign sightings -> exits.yaml at the end (needs exit_landmark_mapper during the run)
+        self.exits = self.declare_parameter("exits", False).value
+        self.exits_script = self.declare_parameter("exits_script", "").value
         self.return_home = self.declare_parameter("return_home", True).value
-        self.home_tolerance = self.declare_parameter("home_tolerance", 0.5).value
+        # 1.0: TARE calls the robot home ~0.5 m short of where it started (0.53 m in the empty room, 2026-11-10)
+        self.home_tolerance = self.declare_parameter("home_tolerance", 1.0).value
         # dynamic typing: a launch argument like return_home_timeout:=300 arrives as an int
         self.return_home_timeout = float(self.declare_parameter(
             "return_home_timeout", 600.0, ParameterDescriptor(dynamic_typing=True)).value)
+        # exit sign sweep before going home (exit_inspection exit_sign_sweep.py)
+        self.sweep = self.declare_parameter("sweep", False).value
+        self.sweep_timeout = float(self.declare_parameter(
+            "sweep_timeout", 900.0, ParameterDescriptor(dynamic_typing=True)).value)
+        self.sweep_nodes = self.declare_parameter("sweep_nodes", ["exit_sweep_goal_bridge"]).value
 
         root = workspace()
         if root is not None:
             self.python = self.python or str(root / ".venv-yolo" / "bin" / "python")
             self.merge_script = self.merge_script or str(
                 root / "src" / "FAST_LIO_SLAM_ROS2" / "SC_PGO_ROS2" / "utils" / "python" / "makeMergedMap.py")
-        for name, path in (("python", self.python), ("merge_script", self.merge_script)):
+        self.prune_script = self.prune_script or os.path.join(os.path.dirname(self.merge_script), "pruneFarGraph.py")
+        if self.exits and not self.exits_script:
+            try:
+                self.exits_script = os.path.join(get_package_prefix("exit_inspection"), "lib", "exit_inspection",
+                                                 "finalize_exits.py")
+            except Exception:  # PackageNotFoundError
+                self.get_logger().error("exits:=true but package exit_inspection not found: no exits.yaml")
+                self.exits = False
+        if self.exits and not os.path.isfile(self.exits_script):
+            self.get_logger().error(f"exits_script '{self.exits_script}' not found: no exits.yaml")
+            self.exits = False
+        for name, path in (("python", self.python), ("merge_script", self.merge_script),
+                           ("prune_script", self.prune_script if self.prune_graph and self.graph_name else self.python)):
             if not os.path.isfile(path):
                 self.get_logger().error(f"{name} '{path}' not found: the map will not be merged")
 
         self.odom = None
         self.create_subscription(Odometry, "/odom", lambda msg: setattr(self, "odom", msg), 5)
-        # FAST-LIO, the frame TARE plans in: where home is and how far the robot is from it
+        # FAST-LIO at the base, as TARE takes it (its sub_state_estimation_topic_): where home is and how far the robot
+        # is from it. Not /Odometry, the lidar, 0.29 m ahead of the base: a robot home but turned round was up to
+        # 0.58 m off there.
+        self.odometry_topic = self.declare_parameter("odometry_topic", "/lio_base_odometry").value
         self.home = None
+        self.home_yaw = 0.0
         self.position = None
-        self.create_subscription(Odometry, "/Odometry", self.on_lio_odometry, 5)
+        self.create_subscription(Odometry, self.odometry_topic, self.on_lio_odometry, 5)
         self.create_subscription(Bool, "/exploration_finish", self.on_exploration_finish, 5)
         self.goal_pub = self.create_publisher(MarkerArray, "/opti_pessi/goal", 1)
         self.save_graph_pub = self.create_publisher(String, "/save_file_dir", 5)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.sweep_pub = self.create_publisher(String, "/exit_inspection/start_sweep", 5)
+        self.sweep_done = False
+        self.sweep_since = None
+        self.create_subscription(String, "/exit_inspection/sweep_done", self.on_sweep_done, latched)
         self.pgo_params = AsyncParameterClient(self, self.pgo_node)
         self.save_directory_future = None
 
-        self.state = "exploring"  # -> returning (with return_home) -> stopping -> merging -> done
+        self.state = "exploring"  # -> sweeping or returning (return_home) -> stopping -> merging -> done
         self.return_since = None
         self.finished_at = None
         self.stop_goal = None
         self.merge = None
         self.map_path = None
+        self.dynamic_path = None
+        self.directory = None
+        self.merged = False
         # graph save: idle -> saving -> stopping -> done (done at once without graph_name)
         self.graph_state = "idle" if self.graph_name else "done"
         self.graph_path = None
         self.graph_since = None
         self.graph_size = -1
+        self.graph_saved = False
+        # graph pruning, after the merge and the graph save: idle -> pruning -> done
+        self.prune_state = "idle" if self.prune_graph and self.graph_name else "done"
+        self.prune = None
+        # exits.yaml, after the merge: idle -> running -> done (done at once without exits)
+        self.exits_state = "idle" if self.exits else "done"
+        self.exits_proc = None
         self.create_timer(0.5, self.tick)
         where = self.save_directory or f"{self.pgo_node}'s save_directory"
         then = "the robot back home, then " if self.return_home else ""
@@ -137,15 +195,29 @@ class TareFinishMergeMap(Node):
         self.position = (msg.pose.pose.position.x, msg.pose.pose.position.y)
         if self.home is None:
             self.home = self.position
+            q = msg.pose.pose.orientation
+            self.home_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def home_distance(self):
         return math.hypot(self.position[0] - self.home[0], self.position[1] - self.home[1])
 
+    def on_sweep_done(self, msg):
+        self.sweep_done = True
+
     def on_exploration_finish(self, msg):
         if not msg.data or self.state != "exploring":
             return
+        if self.sweep:
+            if self.sweep_pub.get_subscription_count() > 0:
+                self.get_logger().info("exploration finished: stopping TARE, exit sign sweep, then home")
+                self.signal_nodes(signal.SIGINT)
+                home = None if self.home is None else [self.home[0], self.home[1], self.home_yaw]
+                self.sweep_pub.publish(String(data=f"home: {home}" if home else "{}"))
+                self.state, self.sweep_since = "sweeping", time.monotonic()
+                return
+            self.get_logger().warn("sweep:=true but nobody listens on /exit_inspection/start_sweep: no sweep")
         if self.return_home and self.home is None:
-            self.get_logger().warn("exploration finished, but no /Odometry: home unknown, ending it here")
+            self.get_logger().warn(f"exploration finished, but no {self.odometry_topic}: home unknown, ending it here")
         elif self.return_home and self.home_distance() > self.home_tolerance:
             self.get_logger().info(
                 f"exploration finished {self.home_distance():.1f} m from home ({self.home[0]:.2f}, {self.home[1]:.2f}): "
@@ -161,15 +233,18 @@ class TareFinishMergeMap(Node):
         if self.odom is None:
             self.get_logger().warn("no /odom: the robot is not stopped, it walks on to the last goal")
         else:
+            # The robot's own yaw (about z only): acados turns to the yaw of its goal, w = 1 would turn it towards +x
+            q = self.odom.pose.pose.orientation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             marker = Marker()
             marker.header.frame_id = self.odom.header.frame_id
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "goal"
-            marker.type = Marker.SPHERE
+            marker.type = Marker.ARROW
             marker.action = Marker.ADD
             marker.pose.position = self.odom.pose.pose.position
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = marker.scale.y = marker.scale.z = 0.3
+            marker.pose.orientation.z, marker.pose.orientation.w = math.sin(0.5 * yaw), math.cos(0.5 * yaw)
+            marker.scale.x, marker.scale.y, marker.scale.z = 0.5, 0.1, 0.1
             marker.color.r, marker.color.a = 1.0, 1.0
             self.stop_goal = MarkerArray(markers=[marker])
             self.goal_pub.publish(self.stop_goal)
@@ -177,7 +252,8 @@ class TareFinishMergeMap(Node):
             self.save_directory_future = self.pgo_params.get_parameters(["save_directory"])
 
     def finished(self):
-        return self.state == "done" and self.graph_state == "done"
+        return (self.state == "done" and self.graph_state == "done" and self.prune_state == "done"
+                and self.exits_state == "done")
 
     def signal_nodes(self, sig, names=None):
         for name in self.stop_nodes if names is None else names:
@@ -212,9 +288,12 @@ class TareFinishMergeMap(Node):
         directory = self.resolve_save_directory()
         if directory is None:
             return False
+        self.directory = directory
         self.map_path = os.path.join(directory, self.map_name)
         log_path = os.path.splitext(self.map_path)[0] + ".log"
-        command = [self.python, self.merge_script, directory, "--no-vis", "--output", self.map_name]
+        self.dynamic_path = os.path.splitext(self.map_path)[0] + "_dynamic.pcd"
+        command = [self.python, self.merge_script, directory, "--no-vis", "--output", self.map_name,
+                   "--dynamic-output", self.dynamic_path]
         self.get_logger().info(f"merging the map: {' '.join(command)} (output in {log_path})")
         try:
             # Its own session: a Ctrl-C on the launch does not reach it, so a started merge still saves the map
@@ -227,7 +306,22 @@ class TareFinishMergeMap(Node):
 
     def tick(self):
         self.tick_graph()
-        if self.state == "returning":
+        self.tick_state()
+        self.tick_prune()
+        self.tick_exits()
+
+    def tick_state(self):
+        if self.state == "sweeping":
+            waited = time.monotonic() - self.sweep_since
+            if self.sweep_done:
+                self.get_logger().info(f"exit sign sweep done after {waited:.0f} s")
+            elif waited > self.sweep_timeout:
+                self.get_logger().warn(f"exit sign sweep not done after {waited:.0f} s (sweep_timeout): stopping it")
+                self.signal_nodes(signal.SIGINT, self.sweep_nodes)
+            else:
+                return
+            self.stop_exploration()
+        elif self.state == "returning":
             distance, waited = self.home_distance(), time.monotonic() - self.return_since
             if distance <= self.home_tolerance:
                 self.get_logger().info(f"robot back home after {waited:.0f} s")
@@ -254,6 +348,7 @@ class TareFinishMergeMap(Node):
             if code == 0 and os.path.isfile(self.map_path):
                 size = os.path.getsize(self.map_path) / 1e6
                 self.get_logger().info(f"map saved: {self.map_path} ({size:.1f} MB)")
+                self.merged = True
             else:
                 self.get_logger().error(f"merge failed (exit code {code}), see "
                                         f"{os.path.splitext(self.map_path)[0]}.log")
@@ -283,6 +378,7 @@ class TareFinishMergeMap(Node):
                 with open(self.graph_path) as f:
                     nodes = sum(1 for _ in f)
                 self.get_logger().info(f"FAR graph saved: {self.graph_path} ({nodes} nodes)")
+                self.graph_saved = True
             elif time.monotonic() - self.graph_since < self.graph_timeout:
                 self.graph_size = size
                 return
@@ -294,6 +390,74 @@ class TareFinishMergeMap(Node):
         elif self.graph_state == "stopping" and time.monotonic() - self.graph_since >= self.flush_time:
             self.signal_nodes(signal.SIGTERM, self.graph_nodes)
             self.graph_state = "done"
+
+    def tick_prune(self):
+        if self.prune_state == "idle":
+            if self.state != "done" or self.graph_state != "done":
+                return
+            if not (self.merged and self.graph_saved and os.path.isfile(self.dynamic_path)):
+                self.get_logger().warn("no merged map or no FAR graph: the graph is not pruned")
+                self.prune_state = "done"
+                return
+            log_path = os.path.splitext(self.graph_path)[0] + "_prune.log"
+            command = [self.python, self.prune_script, self.graph_path, self.map_path, self.dynamic_path]
+            self.get_logger().info(f"pruning the FAR graph: {' '.join(command)} (output in {log_path})")
+            try:
+                with open(log_path, "w") as log:
+                    self.prune = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as e:
+                self.get_logger().error(f"cannot run the graph pruning: {e}")
+                self.prune_state = "done"
+                return
+            self.prune_state = "pruning"
+        elif self.prune_state == "pruning":
+            code = self.prune.poll()
+            if code is None:
+                return
+            if code == 0:
+                with open(self.graph_path) as f:
+                    nodes = sum(1 for _ in f)
+                self.get_logger().info(f"FAR graph pruned: {self.graph_path} ({nodes} nodes)")
+            else:
+                self.get_logger().error(f"graph pruning failed (exit code {code}), the graph is as far_planner saved "
+                                        f"it; see {os.path.splitext(self.graph_path)[0]}_prune.log")
+            self.prune_state = "done"
+
+    def tick_exits(self):
+        if self.exits_state == "idle":
+            if self.state != "done":
+                return
+            if self.directory is None:
+                self.get_logger().warn("save_directory unknown: no exits.yaml")
+                self.exits_state = "done"
+                return
+            log_dir = os.path.join(self.directory, "exit_inspection")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "finalize.log")
+            command = [sys.executable, self.exits_script, self.directory]
+            self.get_logger().info(f"writing the exits: {' '.join(command)} (output in {log_path})")
+            try:
+                with open(log_path, "w") as log:
+                    self.exits_proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                                       start_new_session=True)
+            except OSError as e:
+                self.get_logger().error(f"cannot run finalize_exits.py: {e}")
+                self.exits_state = "done"
+                return
+            self.exits_state = "running"
+        elif self.exits_state == "running":
+            code = self.exits_proc.poll()
+            if code is None:
+                return
+            log_path = os.path.join(self.directory, "exit_inspection", "finalize.log")
+            if code == 0:
+                with open(log_path) as f:
+                    first = f.readline().strip()
+                self.get_logger().info(f"exits written: {os.path.join(self.directory, 'exit_inspection', 'exits.yaml')}"
+                                       f" ({first})")
+            else:
+                self.get_logger().error(f"finalize_exits.py failed (exit code {code}), see {log_path}")
+            self.exits_state = "done"
 
 
 def main():

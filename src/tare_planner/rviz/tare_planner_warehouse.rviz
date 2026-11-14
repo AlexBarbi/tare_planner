@@ -781,6 +781,34 @@ Visualization Manager:
           Value: false
       Enabled: false
       Name: Opti-Pessi
+    - Class: rviz_common/Group
+      Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Trajectory
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /mpc_predictions
+          Value: true
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Obstacles
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /mpc_obstacles
+          Value: true
+      Enabled: true
+      Name: Acados MPC
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
