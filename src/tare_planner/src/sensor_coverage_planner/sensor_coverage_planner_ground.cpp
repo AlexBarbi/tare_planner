@@ -948,7 +948,7 @@ void SensorCoveragePlanner3D::PublishGlobalPlanningVisualization(
   full_path.header.frame_id = "map";
   full_path.header.stamp = this->now();
   // Local patch (commented out upstream): /way_point lies on this path, so path followers steer along it
-  // (ranav_mission tare_path_to_opti_pessi_goal.py; /global_path_full holds it only when the local path is too short)
+  // (ranav_mission opti_pessi_goal_bridge; /global_path_full holds it only when the local path is too short)
   exploration_path_publisher_->publish(full_path);
   exploration_path_.GetVisualizationCloud(exploration_path_cloud_->cloud_);
   exploration_path_cloud_->Publish();
